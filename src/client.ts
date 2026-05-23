@@ -103,7 +103,7 @@ const toSummary = async (issue: SummarisableIssue): Promise<IssueSummary> => {
     id: issue.id,
     identifier: issue.identifier,
     title: issue.title,
-    state: state?.name,
+    state: state?.name?.trim(),
     priority: issue.priority,
     createdAt: issue.createdAt,
     updatedAt: issue.updatedAt,
@@ -155,7 +155,7 @@ const toDetail = async (issue: Issue): Promise<IssueDetail> => {
     identifier: issue.identifier,
     title: issue.title,
     description: issue.description ?? undefined,
-    state: state?.name,
+    state: state?.name?.trim(),
     priority: issue.priority,
     estimate: issue.estimate ?? undefined,
     createdAt: issue.createdAt,
@@ -803,7 +803,7 @@ const collectUserActivity = async (
 
   const stateMap = new Map<string, string>();
   const states = await client.workflowStates({ first: 100 });
-  for (const s of states.nodes) stateMap.set(s.id, s.name);
+  for (const s of states.nodes) stateMap.set(s.id, s.name.trim());
 
   const issues = await client.issues({
     filter: { assignee: { id: { eq: userId } } },
@@ -908,7 +908,7 @@ const collectIssueHistory = async (
     client.workflowStates({ first: 100 }),
     client.users({ first: 100 }),
   ]);
-  for (const s of states.nodes) stateMap.set(s.id, s.name);
+  for (const s of states.nodes) stateMap.set(s.id, s.name.trim());
   for (const u of users.nodes) userMap.set(u.id, u.name);
 
   const issue = await client.issue(issueId);
