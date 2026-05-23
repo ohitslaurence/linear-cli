@@ -10,7 +10,7 @@ import { join } from "node:path";
  */
 export const linearApiKey = Config.redacted("LINEAR_API_KEY");
 
-const envFilePath = (): string => {
+export const envFilePath = (): string => {
   const base = process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config");
   return join(base, "linear", "env");
 };

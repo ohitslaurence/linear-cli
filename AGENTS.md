@@ -26,11 +26,13 @@ src/
                       falls back to ~/.config/linear/env.
   errors.ts           Schema.TaggedError per failure mode + `mapLinearError`.
                       Treat this as "the shared errors" module.
+  auth.ts             Save/clear the API key in ~/.config/linear/env and detect
+                      where the active key resolves from (env vs file).
   types.ts            Plain, serialisable domain types (the --json contract).
   formatters.ts       Human text/CSV formatters + `toJson`.
   commands/
     common.ts         Shared option helpers (jsonOption, textOpt, …) + `render`.
-    issues.ts inbox.ts users.ts projects.ts docs.ts views.ts cycles.ts
+    auth.ts issues.ts inbox.ts users.ts projects.ts docs.ts views.ts cycles.ts
                       One @effect/cli Command per subcommand, grouped by area.
 test/                 bun:test — formatters, --json shape, error mapping,
                       config parsing, option parsing. Never hits the live API.

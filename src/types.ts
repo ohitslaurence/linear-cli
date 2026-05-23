@@ -156,6 +156,14 @@ export interface LinearUser {
   createdAt: Date;
 }
 
+/** The authenticated user, as returned by `whoami` / `auth` commands. */
+export interface Viewer {
+  id: string;
+  name: string;
+  email: string;
+  displayName: string;
+}
+
 export interface Comment {
   id: string;
   body: string;

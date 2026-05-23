@@ -7,7 +7,7 @@ import {
 } from "@linear/sdk";
 import type { Issue } from "@linear/sdk";
 import { linearApiKey } from "./config";
-import { mapLinearError } from "./errors";
+import { mapLinearError, type LinearCliError } from "./errors";
 import {
   ALL_NOTIFICATION_CATEGORIES,
   type Activity,
@@ -33,6 +33,7 @@ import {
   type UpdateIssueInput,
   type UpdatedProject,
   type UserActivity,
+  type Viewer,
 } from "./types";
 
 // Argument types derived from the SDK method signatures, so the mutation inputs
@@ -209,6 +210,17 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
     const viewerId = yield* Effect.cached(
       call("getViewer", async (client) => (await client.viewer).id),
     );
+
+    const whoami = () =>
+      call("whoami", async (client): Promise<Viewer> => {
+        const v = await client.viewer;
+        return {
+          id: v.id,
+          name: v.name,
+          email: v.email,
+          displayName: v.displayName,
+        };
+      });
 
     const listIssues = (filter?: IssueFilter) =>
       Effect.gen(function* () {
@@ -701,6 +713,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
       call("listCycles", (client) => collectCycles(client, teamId, type));
 
     return {
+      whoami,
       listIssues,
       getIssue,
       createIssue,
@@ -733,6 +746,27 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
     };
   }),
 }) {}
+
+/**
+ * Validate an API key by fetching the viewer with a throwaway client. Used by
+ * `auth login` to confirm a key works *before* persisting it — independent of
+ * the configured {@link Linear} service.
+ */
+export const verifyApiKey = (
+  apiKey: string,
+): Effect.Effect<Viewer, LinearCliError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const v = await new LinearClient({ apiKey }).viewer;
+      return {
+        id: v.id,
+        name: v.name,
+        email: v.email,
+        displayName: v.displayName,
+      };
+    },
+    catch: mapLinearError("verifyApiKey"),
+  });
 
 // ============================================
 // Module-level helpers (kept out of the service generator for readability)

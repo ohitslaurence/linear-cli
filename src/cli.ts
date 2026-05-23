@@ -5,6 +5,7 @@ import { ConfigError, Console, Effect, Layer } from "effect";
 import { Linear } from "./client";
 import { ConfigProviderLive } from "./config";
 import type { LinearCliError } from "./errors";
+import { authCommands } from "./commands/auth";
 import { cycleCommands } from "./commands/cycles";
 import { docCommands } from "./commands/docs";
 import { inboxCommands } from "./commands/inbox";
@@ -14,6 +15,7 @@ import { userCommands } from "./commands/users";
 import { viewCommands } from "./commands/views";
 
 const [firstCommand, ...restCommands] = [
+  ...authCommands,
   ...issueCommands,
   ...inboxCommands,
   ...userCommands,

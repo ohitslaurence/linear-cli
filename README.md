@@ -55,24 +55,30 @@ linear --help
 
 ## Authentication
 
-The CLI reads a **personal API key** from the environment:
+The CLI needs a **personal API key**. Get one from **Linear → Settings →
+Security & access → Personal API keys** (`https://linear.app/<workspace>/settings/account/security`).
+
+The easiest way to set it up — `auth login` verifies the key and saves it:
+
+```bash
+linear auth login                  # prompts for the key (input hidden)
+linear auth status                 # → Logged in as You <you@example.com>
+```
+
+```bash
+linear auth login --key lin_api_xxx   # non-interactive (CI / agents)
+linear auth logout                    # remove the saved key
+```
+
+`auth login` stores the key in `~/.config/linear/env` (mode `0600`). Prefer not
+to persist it? Just export it instead — the **environment takes precedence**
+over the file:
 
 ```bash
 export LINEAR_API_KEY=lin_api_xxx
 ```
 
-Get a key from **Linear → Settings → Security & access → Personal API keys**
-(or `https://linear.app/<workspace>/settings/account/security`).
-
-Alternatively, drop it in a file so you don't have to export it everywhere:
-
-```bash
-mkdir -p ~/.config/linear
-echo 'LINEAR_API_KEY=lin_api_xxx' > ~/.config/linear/env
-```
-
-The environment takes precedence over the file. **Never commit your key** — the
-repo's `.gitignore` excludes `.env`.
+**Never commit your key** — the repo's `.gitignore` excludes `.env`.
 
 ## Output modes
 
@@ -117,6 +123,14 @@ $ linear project-statuses --json
 
 Run `linear --help` for the full list and `linear <command> --help` for any
 command's options. `--json` is available on **every** command.
+
+### Auth
+
+```bash
+linear auth login [--key <key>]                 # verify + save a key
+linear auth status                              # who am I? exits non-zero if unauthenticated
+linear auth logout                              # remove the saved key
+```
 
 ### Issues
 
