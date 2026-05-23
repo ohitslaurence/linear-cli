@@ -1,0 +1,44 @@
+{
+  "name": "@ohitslaurence/linear-cli",
+  "version": "0.1.0",
+  "description": "A fast, single-binary CLI for Linear, built for humans and AI agents.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Laurence (@ohitslaurence)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ohitslaurence/linear-cli.git"
+  },
+  "homepage": "https://github.com/ohitslaurence/linear-cli#readme",
+  "bin": {
+    "linear": "./dist/linear"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "build": "bun build src/cli.ts --compile --outfile dist/linear",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@effect/cli": "^0.75.1",
+    "@effect/platform": "^0.96.1",
+    "@effect/platform-bun": "^0.89.0",
+    "@linear/sdk": "^86.0.0",
+    "effect": "^3.21.2"
+  },
+  "devDependencies": {
+    "@effect/language-service": "^0.86.2",
+    "@types/bun": "latest",
+    "oxlint": "^1.66.0",
+    "typescript": "^5.7.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
