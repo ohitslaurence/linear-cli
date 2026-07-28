@@ -67,6 +67,8 @@ export interface CreateIssueInput {
   projectId?: string;
   stateId?: string;
   labelIds?: string[];
+  /** ISO `YYYY-MM-DD`. Linear stores a date, not a timestamp. */
+  dueDate?: string;
   cycleId?: string;
   projectMilestoneId?: string;
   parentId?: string;
@@ -81,6 +83,8 @@ export interface UpdateIssueInput {
   assigneeId?: string;
   projectId?: string;
   labelIds?: string[];
+  /** ISO `YYYY-MM-DD`. Linear stores a date, not a timestamp. */
+  dueDate?: string;
   cycleId?: string;
   projectMilestoneId?: string;
 }

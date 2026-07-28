@@ -308,6 +308,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
           projectId: input.projectId,
           stateId: input.stateId,
           labelIds: input.labelIds,
+          dueDate: input.dueDate,
           cycleId: input.cycleId,
           projectMilestoneId: input.projectMilestoneId,
           parentId: input.parentId,
@@ -329,6 +330,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
           assigneeId: input.assigneeId,
           projectId: input.projectId,
           labelIds: input.labelIds,
+          dueDate: input.dueDate,
           cycleId: input.cycleId,
           projectMilestoneId: input.projectMilestoneId,
         };
