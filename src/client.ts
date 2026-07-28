@@ -263,12 +263,18 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
       call("attachmentLinkSlack", async (client) => {
         // The mutation needs the issue's UUID; callers work in SPR-1234 terms.
         const issue = await client.issue(identifier);
-        // Without `syncToCommentThread` the link is one-directional: Linear
-        // shows the Slack thread, and the thread shows nothing. That is not
-        // what "linked" means to the person who asked — they want to see the
-        // work is tracked without leaving Slack. With it, Linear behaves as it
-        // does when you use the Slack app's "link existing issue" action, and
-        // comments sync both ways.
+        // `syncToCommentThread` decides whether the *asker* learns anything.
+        //
+        //   false — the attachment exists on the issue and nothing is posted to
+        //           Slack. Only someone already in Linear sees it. Right for a
+        //           thread where the ticket must stay internal.
+        //   true  — Linear posts the issue into the thread and syncs replies as
+        //           comments. This is what the Slack app's "link existing issue"
+        //           action does, and the only version that tells the person who
+        //           asked that their request is tracked.
+        //
+        // Defaults to true, because being told is the entire point of
+        // acknowledging a request.
         // Re-linking the same thread must succeed. Linear documents attachment
         // URLs as idempotent per issue, but `attachmentLinkSlack` rejects a
         // duplicate outright — and a capture that fails on its second run is a

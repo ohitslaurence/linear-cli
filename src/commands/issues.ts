@@ -209,7 +209,7 @@ const attachSlack = Command.make(
     ),
     noSync: Options.boolean("no-sync").pipe(
       Options.withDescription(
-        "Link without two-way comment sync — Linear sees the thread, Slack shows nothing.",
+        "Record the link privately: it appears on the issue in Linear, and nothing is posted to Slack. Use for threads where the ticket must stay internal.",
       ),
     ),
   },
@@ -220,8 +220,8 @@ const attachSlack = Command.make(
       yield* render(json, data, () =>
         `Linked ${data.issue} ↔ Slack thread.\n${data.issueUrl}\n` +
           (data.syncToCommentThread
-            ? "Two-way sync on: the thread shows this issue and comments sync both ways."
-            : "One-way: Linear shows the thread; Slack shows nothing."),
+            ? "Slack: Linear posted the issue in the thread; replies sync as comments both ways."
+            : "Slack: nothing posted — the link is visible only from Linear."),
       );
     }),
 ).pipe(
