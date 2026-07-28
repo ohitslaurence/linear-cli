@@ -255,17 +255,38 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
      * linking is not always wanted: a thread with external participants should
      * get a ticket without leaking internal identifiers into a shared channel.
      */
-    const linkSlackThread = (identifier: string, url: string) =>
+    const linkSlackThread = (
+      identifier: string,
+      url: string,
+      syncToCommentThread = true,
+    ) =>
       call("attachmentLinkSlack", async (client) => {
         // The mutation needs the issue's UUID; callers work in SPR-1234 terms.
         const issue = await client.issue(identifier);
-        const result = await client.attachmentLinkSlack(issue.id, url);
+        // Without `syncToCommentThread` the link is one-directional: Linear
+        // shows the Slack thread, and the thread shows nothing. That is not
+        // what "linked" means to the person who asked — they want to see the
+        // work is tracked without leaving Slack. With it, Linear behaves as it
+        // does when you use the Slack app's "link existing issue" action, and
+        // comments sync both ways.
+        // Re-linking the same thread must succeed. Linear documents attachment
+        // URLs as idempotent per issue, but `attachmentLinkSlack` rejects a
+        // duplicate outright — and a capture that fails on its second run is a
+        // capture nobody trusts. Clear the existing link first.
+        const existing = await issue.attachments();
+        const duplicate = existing.nodes.find((a) => a.url === url);
+        if (duplicate) await duplicate.delete();
+
+        const result = await client.attachmentLinkSlack(issue.id, url, {
+          syncToCommentThread,
+        });
         const attachment = await result.attachment;
         return {
           issue: issue.identifier,
           issueUrl: issue.url,
           attachmentId: attachment?.id ?? null,
           url,
+          syncToCommentThread,
         };
       });
 

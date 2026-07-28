@@ -1,4 +1,4 @@
-import { Args, Command } from "@effect/cli";
+import { Args, Command, Options } from "@effect/cli";
 import { Effect } from "effect";
 import { Linear } from "../client";
 import * as fmt from "../formatters";
@@ -207,14 +207,21 @@ const attachSlack = Command.make(
     url: Args.text({ name: "slack-url" }).pipe(
       Args.withDescription("Slack message or thread permalink."),
     ),
+    noSync: Options.boolean("no-sync").pipe(
+      Options.withDescription(
+        "Link without two-way comment sync — Linear sees the thread, Slack shows nothing.",
+      ),
+    ),
   },
-  ({ json, id, url }) =>
+  ({ json, id, url, noSync }) =>
     Effect.gen(function* () {
       const linear = yield* Linear;
-      const data = yield* linear.linkSlackThread(id, url);
+      const data = yield* linear.linkSlackThread(id, url, !noSync);
       yield* render(json, data, () =>
         `Linked ${data.issue} ↔ Slack thread.\n${data.issueUrl}\n` +
-        "The thread will show this issue's status and be notified when it closes.",
+          (data.syncToCommentThread
+            ? "Two-way sync on: the thread shows this issue and comments sync both ways."
+            : "One-way: Linear shows the thread; Slack shows nothing."),
       );
     }),
 ).pipe(
