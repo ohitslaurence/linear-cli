@@ -190,4 +190,45 @@ const comment = Command.make(
     }),
 ).pipe(Command.withDescription("Add a comment to an issue."));
 
-export const issueCommands = [issue, issues, create, update, search, comment];
+
+/**
+ * Linking is opt-in rather than automatic on create, because whether a Slack
+ * thread should see an issue depends on who is in it. An internal thread wants
+ * the link so the asker can follow the work; a thread shared with a customer,
+ * partner or auditor should not receive internal identifiers.
+ */
+const attachSlack = Command.make(
+  "attach-slack",
+  {
+    json: jsonOption,
+    id: Args.text({ name: "issue-id" }).pipe(
+      Args.withDescription("Issue identifier, e.g. SPR-1234."),
+    ),
+    url: Args.text({ name: "slack-url" }).pipe(
+      Args.withDescription("Slack message or thread permalink."),
+    ),
+  },
+  ({ json, id, url }) =>
+    Effect.gen(function* () {
+      const linear = yield* Linear;
+      const data = yield* linear.linkSlackThread(id, url);
+      yield* render(json, data, () =>
+        `Linked ${data.issue} ↔ Slack thread.\n${data.issueUrl}\n` +
+        "The thread will show this issue's status and be notified when it closes.",
+      );
+    }),
+).pipe(
+  Command.withDescription(
+    "Link a Slack thread to an issue, so the thread gets status updates.",
+  ),
+);
+
+export const issueCommands = [
+  issue,
+  issues,
+  create,
+  update,
+  search,
+  comment,
+  attachSlack,
+];

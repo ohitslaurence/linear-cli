@@ -242,6 +242,33 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
     const getIssue = (identifier: string) =>
       call("getIssue", async (client) => toDetail(await client.issue(identifier)));
 
+    /**
+     * Link a Slack thread to an issue as a rich attachment.
+     *
+     * Not the same as pasting the URL into the description. When the workspace
+     * has the Slack integration configured, this creates a two-way link: the
+     * thread shows the issue's status, and closing the issue notifies the
+     * thread. That is what lets someone who asked in Slack follow the work
+     * without asking again — the whole point of acknowledging a request.
+     *
+     * Deliberately a separate call rather than part of `create`, because
+     * linking is not always wanted: a thread with external participants should
+     * get a ticket without leaking internal identifiers into a shared channel.
+     */
+    const linkSlackThread = (identifier: string, url: string) =>
+      call("attachmentLinkSlack", async (client) => {
+        // The mutation needs the issue's UUID; callers work in SPR-1234 terms.
+        const issue = await client.issue(identifier);
+        const result = await client.attachmentLinkSlack(issue.id, url);
+        const attachment = await result.attachment;
+        return {
+          issue: issue.identifier,
+          issueUrl: issue.url,
+          attachmentId: attachment?.id ?? null,
+          url,
+        };
+      });
+
     const createIssue = (input: CreateIssueInput) =>
       call("createIssue", async (client) => {
         const arg: CreateIssueArg = {
@@ -717,6 +744,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
       listIssues,
       getIssue,
       createIssue,
+      linkSlackThread,
       updateIssue,
       searchIssues,
       addComment,
