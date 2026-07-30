@@ -7,7 +7,7 @@ import {
 } from "@linear/sdk";
 import type { Issue } from "@linear/sdk";
 import { linearApiKey } from "./config";
-import { mapLinearError, type LinearCliError } from "./errors";
+import { ValidationError, mapLinearError, type LinearCliError } from "./errors";
 import {
   ALL_NOTIFICATION_CATEGORIES,
   type Activity,
@@ -34,6 +34,7 @@ import {
   type UpdatedProject,
   type UserActivity,
   type Viewer,
+  type IssueLabel,
 } from "./types";
 
 // Argument types derived from the SDK method signatures, so the mutation inputs
@@ -62,10 +63,15 @@ const HEALTH: Record<ProjectHealth, ProjectUpdateHealthType> = {
 export type ProjectHealth = "onTrack" | "atRisk" | "offTrack";
 
 /** Translate the CLI's `--state` keyword (or a literal state name) into a filter. */
-const stateFilter = (state: string): IssueQueryFilter["state"] => {
+export const stateFilter = (state: string): IssueQueryFilter["state"] => {
   switch (state) {
     case "active":
       return { type: { in: ["started", "unstarted"] } };
+    // "Everything still on my plate." Distinct from `active`, which excludes
+    // triage and backlog — a day view built on `active` silently hides freshly
+    // captured work, which is exactly the work most likely to matter today.
+    case "open":
+      return { type: { nin: ["completed", "canceled"] } };
     case "completed":
       return { type: { eq: "completed" } };
     case "canceled":
@@ -234,6 +240,11 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
         if (filter?.team) queryFilter.team = { key: { eq: filter.team } };
         if (filter?.project) queryFilter.project = { id: { eq: filter.project } };
         if (filter?.cycle) queryFilter.cycle = { id: { eq: filter.cycle } };
+        // Labels filter by name rather than id: a label only earns its keep if
+        // you can type it, and ids would push every caller through a lookup.
+        if (filter?.label) {
+          queryFilter.labels = { name: { eqIgnoreCase: filter.label } };
+        }
         return yield* call("listIssues", (client) =>
           collectIssues(client, queryFilter, filter?.limit ?? PAGE_SIZE),
         );
@@ -241,6 +252,119 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
 
     const getIssue = (identifier: string) =>
       call("getIssue", async (client) => toDetail(await client.issue(identifier)));
+
+    /**
+     * Every label available, optionally scoped to one team.
+     *
+     * Exists so labels can be referred to by name everywhere else. Without a
+     * way to list them, `--label` would mean "paste a UUID", which is the same
+     * papercut `--state` still has.
+     */
+    const listLabels = (teamKey?: string) =>
+      call("listLabels", async (client): Promise<IssueLabel[]> => {
+        const result = await client.issueLabels({ first: 250 });
+        const labels = await Promise.all(
+          result.nodes.map(async (label) => {
+            const [team, parent] = await Promise.all([label.team, label.parent]);
+            return {
+              id: label.id,
+              name: label.name,
+              color: label.color ?? undefined,
+              group: parent?.name ?? undefined,
+              teamKey: team?.key ?? undefined,
+            };
+          }),
+        );
+        const scoped = teamKey
+          ? labels.filter((l) => l.teamKey === undefined || l.teamKey === teamKey)
+          : labels;
+        return scoped
+          .map(({ teamKey: _omit, ...label }) => label)
+          .sort((a, b) => a.name.localeCompare(b.name));
+      });
+
+    /** Create a label. Idempotent by name — returns the existing one if it exists. */
+    const createLabel = (input: {
+      readonly name: string;
+      readonly teamId?: string;
+      readonly color?: string;
+      readonly description?: string;
+    }) =>
+      Effect.gen(function* () {
+        const existing = yield* listLabels();
+        const match = existing.find(
+          (l) => l.name.toLowerCase() === input.name.trim().toLowerCase(),
+        );
+        if (match) return match;
+        return yield* call("createLabel", async (client): Promise<IssueLabel> => {
+          const result = await client.createIssueLabel({
+            name: input.name,
+            teamId: input.teamId,
+            color: input.color,
+            description: input.description,
+          });
+          const label = await result.issueLabel;
+          if (!label) throw new Error("Label not returned after creation");
+          return { id: label.id, name: label.name, color: label.color ?? undefined };
+        });
+      });
+
+    /** Resolve label names to ids, case-insensitively. Unknown names are an error. */
+    const resolveLabelIds = (names: readonly string[]) =>
+      Effect.gen(function* () {
+        if (names.length === 0) return [] as string[];
+        const all = yield* listLabels();
+        const byName = new Map(all.map((l) => [l.name.toLowerCase(), l.id]));
+        const ids: string[] = [];
+        const missing: string[] = [];
+        for (const name of names) {
+          const id = byName.get(name.trim().toLowerCase());
+          if (id) ids.push(id);
+          else missing.push(name);
+        }
+        if (missing.length > 0) {
+          return yield* Effect.fail(
+            new ValidationError({
+              operation: "resolveLabelIds",
+              field: "label",
+              message:
+                `unknown label(s): ${missing.join(", ")}. ` +
+                "Run `linear labels` to see what exists — labels are created in Linear, not here",
+            }),
+          );
+        }
+        return ids;
+      });
+
+    /**
+     * Add or remove labels without disturbing the others.
+     *
+     * `updateIssue` takes `labelIds` as the *complete* set, so passing one label
+     * silently strips every other label the issue had. That is a data-losing
+     * footgun for a flag as casual as `--label`, so the read-merge-write lives
+     * here and callers get add/remove semantics instead.
+     */
+    const changeLabels = (
+      identifier: string,
+      opts: { readonly add?: readonly string[]; readonly remove?: readonly string[] },
+    ) =>
+      Effect.gen(function* () {
+        const addIds = yield* resolveLabelIds(opts.add ?? []);
+        const removeIds = yield* resolveLabelIds(opts.remove ?? []);
+        return yield* call("changeLabels", async (client) => {
+          const issue = await client.issue(identifier);
+          const current = await issue.labels();
+          const next = new Set(current.nodes.map((l) => l.id));
+          for (const id of removeIds) next.delete(id);
+          for (const id of addIds) next.add(id);
+          const result = await client.updateIssue(issue.id, {
+            labelIds: [...next],
+          });
+          const updated = await result.issue;
+          if (!updated) throw new Error("Issue not returned after label change");
+          return toDetail(updated);
+        });
+      });
 
     /**
      * Link a Slack thread to an issue as a rich attachment.
@@ -773,6 +897,10 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
       listIssues,
       getIssue,
       createIssue,
+      listLabels,
+      createLabel,
+      resolveLabelIds,
+      changeLabels,
       linkSlackThread,
       updateIssue,
       searchIssues,

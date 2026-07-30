@@ -46,3 +46,25 @@ export const render = (
   data: unknown,
   text: () => string,
 ): Effect.Effect<void> => Console.log(json ? toJson(data) : text());
+
+/**
+ * Comma-separated option → `string[]` (empty when absent).
+ *
+ * Used for labels, where "one or several" is the normal case and forcing
+ * repeated flags for the common one would be worse than parsing a comma.
+ */
+export const listOpt = (name: string, description: string) =>
+  Options.text(name).pipe(
+    Options.withDescription(description),
+    Options.optional,
+    Options.map((value) =>
+      Option.match(value, {
+        onNone: () => [] as readonly string[],
+        onSome: (raw) =>
+          raw
+            .split(",")
+            .map((part) => part.trim())
+            .filter((part) => part.length > 0),
+      }),
+    ),
+  );

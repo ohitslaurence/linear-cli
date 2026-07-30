@@ -54,7 +54,17 @@ export interface IssueFilter {
   team?: string;
   project?: string;
   cycle?: string;
+  /** Label *name*, matched exactly. The whole point of labels is that you type them. */
+  label?: string;
   limit?: number;
+}
+
+export interface IssueLabel {
+  id: string;
+  name: string;
+  color?: string;
+  /** Parent group name, when the label belongs to one. */
+  group?: string;
 }
 
 export interface CreateIssueInput {
