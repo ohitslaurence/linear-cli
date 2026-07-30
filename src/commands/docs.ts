@@ -35,7 +35,7 @@ const doc = Command.make(
     json: jsonOption,
     title: reqText("title", "Document title."),
     project: textOpt("project", "Attach to project id."),
-    team: textOpt("team", "Attach to team id."),
+    team: textOpt("team", "Attach to a team: key (SPR), name, or id."),
     issue: textOpt("issue", "Attach to issue id."),
     file: textOpt("file", "Read content from this file."),
     content: Args.text({ name: "content" }).pipe(
@@ -46,9 +46,9 @@ const doc = Command.make(
   ({ json, title, project, team, issue, file, content }) =>
     Effect.gen(function* () {
       const projectId = orUndef(project);
-      const teamId = orUndef(team);
+      const teamValue = orUndef(team);
       const issueId = orUndef(issue);
-      if (projectId === undefined && teamId === undefined && issueId === undefined) {
+      if (projectId === undefined && teamValue === undefined && issueId === undefined) {
         return yield* Effect.fail(
           new ValidationError({
             operation: "doc",
@@ -58,6 +58,9 @@ const doc = Command.make(
       }
       const body = yield* resolveContent(orUndef(file), content);
       const linear = yield* Linear;
+      const teamId = teamValue
+        ? (yield* linear.resolveTeam(teamValue)).id
+        : undefined;
       const data = yield* linear.createDocument(title, body, {
         projectId,
         teamId,

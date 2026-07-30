@@ -1,13 +1,34 @@
-import { Effect, Redacted } from "effect";
+import { Effect, Redacted, type ConfigError } from "effect";
 import {
   LinearClient,
   IssueNotification,
   ProjectNotification,
   ProjectUpdateHealthType,
 } from "@linear/sdk";
-import type { Issue } from "@linear/sdk";
 import { linearApiKey } from "./config";
 import { ValidationError, mapLinearError, type LinearCliError } from "./errors";
+import {
+  ISSUE_COMMENTS_QUERY,
+  ISSUE_DETAIL_QUERY,
+  ISSUE_LIST_QUERY,
+  ISSUE_SEARCH_QUERY,
+  TEAMS_QUERY,
+  VIEW_ISSUES_QUERY,
+  WORKFLOW_STATES_QUERY,
+  type GqlCommentNode,
+  type GqlConnection,
+  type GqlIssueDetailNode,
+  type GqlIssueNode,
+  type GqlTeamNode,
+  type GqlWorkflowStateNode,
+  type IssueCommentsResponse,
+  type IssueDetailResponse,
+  type IssueListResponse,
+  type IssueSearchResponse,
+  type TeamsResponse,
+  type ViewIssuesResponse,
+  type WorkflowStatesResponse,
+} from "./gql";
 import {
   ALL_NOTIFICATION_CATEGORIES,
   type Activity,
@@ -15,11 +36,13 @@ import {
   type CreateIssueInput,
   type CreatedDocument,
   type CreatedProject,
+  type CreatedView,
   type Cycle,
   type CustomView,
   type Favorite,
   type HistoryEntry,
   type Inbox,
+  type IssueComment,
   type IssueDetail,
   type IssueFilter,
   type IssueSummary,
@@ -27,14 +50,19 @@ import {
   type Notification,
   type NotificationCategory,
   type InboxFilter,
+  type PageInfo,
+  type Paged,
   type ProjectMilestone,
   type ProjectStatus,
   type ProjectSummary,
+  type TeamSummary,
   type UpdateIssueInput,
+  type UpdateIssueRequest,
   type UpdatedProject,
   type UserActivity,
   type Viewer,
   type IssueLabel,
+  type WorkflowState,
 } from "./types";
 
 // Argument types derived from the SDK method signatures, so the mutation inputs
@@ -48,11 +76,15 @@ type UpdateProjectArg = Parameters<LinearClient["updateProject"]>[1];
 type CreateMilestoneArg = Parameters<LinearClient["createProjectMilestone"]>[0];
 type CreateDocumentArg = Parameters<LinearClient["createDocument"]>[0];
 type CreateProjectUpdateArg = Parameters<LinearClient["createProjectUpdate"]>[0];
+type CreateCustomViewArg = Parameters<LinearClient["createCustomView"]>[0];
 type NotificationNode = Awaited<
   ReturnType<LinearClient["notifications"]>
 >["nodes"][number];
 
 const PAGE_SIZE = 50;
+
+/** Enumerating states, teams and users is bounded; one big page is enough. */
+const BULK_PAGE_SIZE = 250;
 
 const HEALTH: Record<ProjectHealth, ProjectUpdateHealthType> = {
   onTrack: ProjectUpdateHealthType.OnTrack,
@@ -61,6 +93,21 @@ const HEALTH: Record<ProjectHealth, ProjectUpdateHealthType> = {
 };
 
 export type ProjectHealth = "onTrack" | "atRisk" | "offTrack";
+
+/**
+ * What any service method can fail with.
+ *
+ * `ConfigError` rides along because the API key is read lazily — a command only
+ * discovers there is no usable key at the moment it first needs one. `cli.ts`
+ * catches it separately and turns it into setup instructions.
+ */
+type ServiceError = LinearCliError | ConfigError.ConfigError;
+
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Whether a value is already a Linear id, or a human name we have to look up. */
+export const isUuid = (value: string): boolean => UUID.test(value.trim());
 
 /** Translate the CLI's `--state` keyword (or a literal state name) into a filter. */
 export const stateFilter = (state: string): IssueQueryFilter["state"] => {
@@ -77,7 +124,7 @@ export const stateFilter = (state: string): IssueQueryFilter["state"] => {
     case "canceled":
       return { type: { eq: "canceled" } };
     default:
-      return { name: { eq: state } };
+      return { name: { eqIgnoreCase: state } };
   }
 };
 
@@ -86,99 +133,193 @@ const toCategory = (raw: string): NotificationCategory =>
     ? (raw as NotificationCategory)
     : "feed";
 
-// Structural subset shared by `Issue` and `IssueSearchResult`, so list and
-// search results can both be summarised by one mapper.
-type SummarisableIssue = Pick<
-  Issue,
-  | "id"
-  | "identifier"
-  | "title"
-  | "priority"
-  | "createdAt"
-  | "updatedAt"
-  | "completedAt"
-  | "canceledAt"
-  | "url"
-  | "state"
-  | "team"
->;
+// ============================================
+// Pagination
+// ============================================
 
-const toSummary = async (issue: SummarisableIssue): Promise<IssueSummary> => {
-  const [state, team] = await Promise.all([issue.state, issue.team]);
-  return {
-    id: issue.id,
-    identifier: issue.identifier,
-    title: issue.title,
-    state: state?.name?.trim(),
-    priority: issue.priority,
-    createdAt: issue.createdAt,
-    updatedAt: issue.updatedAt,
-    completedAt: issue.completedAt ?? undefined,
-    canceledAt: issue.canceledAt ?? undefined,
-    team: team?.name,
-    url: issue.url,
-  };
-};
+const pageInfoOf = (input: {
+  returned: number;
+  limit: number;
+  hasNextPage: boolean;
+  endCursor?: string | undefined;
+  totalCount?: number | undefined;
+}): PageInfo => ({
+  returned: input.returned,
+  limit: input.limit,
+  hasNextPage: input.hasNextPage,
+  truncated: input.hasNextPage,
+  endCursor: input.endCursor,
+  totalCount: input.totalCount,
+});
 
-const collectIssues = async (
-  client: LinearClient,
-  filter: IssueQueryFilter,
+/**
+ * Wrap a list that was fetched in full. `truncated: false` here is a claim, not
+ * a default — only use it where every page really was walked.
+ */
+const complete = <T>(items: T[], totalCount?: number): Paged<T> => ({
+  items,
+  pageInfo: pageInfoOf({
+    returned: items.length,
+    limit: items.length,
+    hasNextPage: false,
+    totalCount: totalCount ?? items.length,
+  }),
+});
+
+/**
+ * Page through a connection until `limit` items are collected, reporting
+ * honestly whether anything was left behind.
+ */
+const collectPaged = <Node, Item, E>(
   limit: number,
-): Promise<IssueSummary[]> => {
-  const issues: IssueSummary[] = [];
-  let cursor: string | null = null;
+  fetchPage: (
+    first: number,
+    after: string | undefined,
+  ) => Effect.Effect<{ connection: GqlConnection<Node>; totalCount?: number }, E>,
+  map: (node: Node) => Item,
+): Effect.Effect<Paged<Item>, E> =>
+  Effect.gen(function* () {
+    const items: Item[] = [];
+    let cursor: string | undefined;
+    let hasNextPage = false;
+    let totalCount: number | undefined;
 
-  while (issues.length < limit) {
-    const page = await client.issues({
-      filter,
-      first: Math.min(PAGE_SIZE, limit - issues.length),
-      ...(cursor ? { after: cursor } : {}),
-    });
-    for (const node of page.nodes) issues.push(await toSummary(node));
-    if (!page.pageInfo.hasNextPage) break;
-    cursor = page.pageInfo.endCursor ?? null;
-    if (!cursor) break;
-  }
+    while (items.length < limit) {
+      const page = yield* fetchPage(
+        Math.min(PAGE_SIZE, limit - items.length),
+        cursor,
+      );
+      if (page.totalCount !== undefined) totalCount = page.totalCount;
+      for (const node of page.connection.nodes) items.push(map(node));
+      hasNextPage = page.connection.pageInfo.hasNextPage;
+      cursor = page.connection.pageInfo.endCursor ?? undefined;
+      if (!hasNextPage || !cursor) break;
+    }
 
-  return issues.slice(0, limit);
+    return {
+      items,
+      pageInfo: pageInfoOf({
+        returned: items.length,
+        limit,
+        hasNextPage,
+        endCursor: hasNextPage ? cursor : undefined,
+        totalCount,
+      }),
+    };
+  });
+
+// ============================================
+// GraphQL → domain mappers
+// ============================================
+
+const toDate = (value: string | null | undefined): Date | undefined =>
+  value ? new Date(value) : undefined;
+
+const summaryOf = (node: GqlIssueNode): IssueSummary => ({
+  id: node.id,
+  identifier: node.identifier,
+  title: node.title,
+  state: node.state?.name?.trim(),
+  stateType: node.state?.type,
+  priority: node.priority,
+  createdAt: new Date(node.createdAt),
+  updatedAt: new Date(node.updatedAt),
+  completedAt: toDate(node.completedAt),
+  canceledAt: toDate(node.canceledAt),
+  dueDate: node.dueDate ?? undefined,
+  team: node.team?.name,
+  teamKey: node.team?.key,
+  project: node.project?.name,
+  assignee: node.assignee?.displayName ?? node.assignee?.name,
+  assigneeId: node.assignee?.id,
+  labels: node.labels.nodes.map((l) => l.name),
+  parent: node.parent?.identifier,
+  url: node.url,
+});
+
+const detailOf = (node: GqlIssueDetailNode): IssueDetail => ({
+  ...summaryOf(node),
+  description: node.description ?? undefined,
+  estimate: node.estimate ?? undefined,
+  creator: node.creator?.name,
+  milestone: node.projectMilestone?.name,
+  children: node.children.nodes.map((c) => ({
+    id: c.id,
+    identifier: c.identifier,
+    title: c.title,
+    state: c.state?.name?.trim(),
+    stateType: c.state?.type,
+  })),
+  attachments: node.attachments.nodes.map((a) => ({
+    id: a.id,
+    title: a.title,
+    url: a.url,
+    sourceType: a.sourceType ?? undefined,
+  })),
+});
+
+const commentOf = (node: GqlCommentNode): IssueComment => ({
+  id: node.id,
+  body: node.body,
+  createdAt: new Date(node.createdAt),
+  updatedAt: new Date(node.updatedAt),
+  authorId: node.user?.id,
+  author: node.user?.displayName ?? node.user?.name,
+  authorEmail: node.user?.email ?? undefined,
+  parentId: node.parent?.id,
+  // A comment that starts a thread is its own root. Making that explicit means
+  // grouping by `threadId` works without special-casing top-level comments.
+  threadId: node.parent?.id ?? node.id,
+  url: node.url ?? undefined,
+  resolvedAt: toDate(node.resolvedAt),
+});
+
+const stateOf = (node: GqlWorkflowStateNode): WorkflowState => ({
+  id: node.id,
+  name: node.name.trim(),
+  type: node.type,
+  position: node.position,
+  color: node.color ?? undefined,
+  teamKey: node.team?.key,
+  teamName: node.team?.name,
+});
+
+const teamOf = (node: GqlTeamNode): TeamSummary => ({
+  id: node.id,
+  key: node.key,
+  name: node.name,
+});
+
+/**
+ * `--since`, accepted as either a date or a full instant.
+ *
+ * A bare `YYYY-MM-DD` cannot order two messages exchanged the same afternoon,
+ * which is the common case when the target is a four-hour response time — so
+ * an instant has to be expressible. An unparseable value is an error rather
+ * than a silently-dropped filter: `--since $UNSET` previously widened the query
+ * to all time and looked like a quiet day.
+ */
+export const parseSince = (
+  operation: string,
+  value: string,
+): Effect.Effect<Date, ValidationError> => {
+  const parsed = new Date(value.trim());
+  return Number.isNaN(parsed.getTime())
+    ? Effect.fail(
+        new ValidationError({
+          operation,
+          field: "since",
+          message:
+            `'${value}' is not a date or timestamp. Use YYYY-MM-DD for a ` +
+            `whole day, or an ISO-8601 instant such as ` +
+            `2026-07-30T14:30:00Z when ordering within a day matters.`,
+        }),
+      )
+    : Effect.succeed(parsed);
 };
 
-const toDetail = async (issue: Issue): Promise<IssueDetail> => {
-  const [state, team, project, milestone, parent, assignee, creator, labels] =
-    await Promise.all([
-      issue.state,
-      issue.team,
-      issue.project,
-      issue.projectMilestone,
-      issue.parent,
-      issue.assignee,
-      issue.creator,
-      issue.labels(),
-    ]);
-
-  return {
-    id: issue.id,
-    identifier: issue.identifier,
-    title: issue.title,
-    description: issue.description ?? undefined,
-    state: state?.name?.trim(),
-    priority: issue.priority,
-    estimate: issue.estimate ?? undefined,
-    createdAt: issue.createdAt,
-    updatedAt: issue.updatedAt,
-    completedAt: issue.completedAt ?? undefined,
-    canceledAt: issue.canceledAt ?? undefined,
-    dueDate: issue.dueDate ?? undefined,
-    team: team?.name,
-    project: project?.name,
-    milestone: milestone?.name,
-    parent: parent?.identifier,
-    assignee: assignee?.name,
-    creator: creator?.name,
-    url: issue.url,
-    labels: labels.nodes.map((l) => l.name),
-  };
-};
+const listOf = (values: readonly string[]): string =>
+  values.length > 0 ? values.join(", ") : "(none)";
 
 /**
  * The Linear API surface, exposed as an Effect service. Every method returns an
@@ -202,7 +343,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
     const call = <A>(
       operation: string,
       fn: (client: LinearClient) => Promise<A>,
-    ) =>
+    ): Effect.Effect<A, ServiceError> =>
       getClient.pipe(
         Effect.flatMap((client) =>
           Effect.tryPromise({
@@ -211,6 +352,30 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
           }),
         ),
       );
+
+    /**
+     * Run a hand-written GraphQL document.
+     *
+     * `rawRequest` rather than `request`: only the former converts failures into
+     * a `LinearError`, which is what {@link mapLinearError} knows how to
+     * classify. `request` throws a bare client error that would land in the
+     * catch-all and lose the 429 vs 503 distinction.
+     */
+    const raw = <Data>(
+      operation: string,
+      query: string,
+      variables: Record<string, unknown>,
+    ): Effect.Effect<Data, ServiceError> =>
+      call(operation, async (client) => {
+        const response = await client.client.rawRequest<
+          Data,
+          Record<string, unknown>
+        >(query, variables);
+        if (!response.data) {
+          throw new Error("the API returned no data");
+        }
+        return response.data;
+      });
 
     // Viewer id is needed for `--assignee me`; resolve it at most once.
     const viewerId = yield* Effect.cached(
@@ -228,16 +393,210 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
         };
       });
 
-    const listIssues = (filter?: IssueFilter) =>
+    // ============================================
+    // Lookup tables + resolvers
+    //
+    // Every "…Id" argument accepts a name a human would type. The three caches
+    // below are what make that affordable: a ten-issue batch resolves its team,
+    // state and assignee names against one fetch each, not thirty.
+    // ============================================
+
+    const allTeams = yield* Effect.cached(
+      raw<TeamsResponse>("listTeams", TEAMS_QUERY, {
+        first: BULK_PAGE_SIZE,
+      }).pipe(Effect.map((r) => r.teams.nodes.map(teamOf))),
+    );
+
+    const allStates = yield* Effect.cached(
+      raw<WorkflowStatesResponse>("listStates", WORKFLOW_STATES_QUERY, {
+        first: BULK_PAGE_SIZE,
+      }).pipe(Effect.map((r) => r.workflowStates.nodes.map(stateOf))),
+    );
+
+    const listUsers = () =>
+      call("listUsers", async (client) => {
+        const users: LinearUser[] = [];
+        let cursor: string | null = null;
+        let more = true;
+        while (more) {
+          const page = await client.users({
+            first: PAGE_SIZE,
+            ...(cursor ? { after: cursor } : {}),
+          });
+          for (const u of page.nodes) {
+            users.push({
+              id: u.id,
+              name: u.name,
+              email: u.email,
+              displayName: u.displayName,
+              active: u.active,
+              admin: u.admin,
+              createdAt: u.createdAt,
+            });
+          }
+          more = page.pageInfo.hasNextPage;
+          cursor = page.pageInfo.endCursor ?? null;
+          if (!cursor) more = false;
+        }
+        return users;
+      });
+
+    const allUsers = yield* Effect.cached(listUsers());
+
+    /**
+     * Accept a team key (`SPR`), a UUID, or the team's name — interchangeably.
+     *
+     * Previously `issues --team` wanted the key while `cycles` wanted the UUID,
+     * and supplying the wrong one returned an empty list rather than an error:
+     * the failure looked exactly like "that team has no work".
+     */
+    const resolveTeam = (value: string): Effect.Effect<TeamSummary, ServiceError> =>
+      Effect.gen(function* () {
+        const wanted = value.trim().toLowerCase();
+        const teams = yield* allTeams;
+        const match =
+          teams.find((t) => t.key.toLowerCase() === wanted) ??
+          teams.find((t) => t.id.toLowerCase() === wanted) ??
+          teams.find((t) => t.name.toLowerCase() === wanted);
+        if (match) return match;
+        return yield* Effect.fail(
+          new ValidationError({
+            operation: "resolveTeam",
+            field: "team",
+            message:
+              `no team matches '${value}'. Known teams: ` +
+              `${listOf(teams.map((t) => `${t.key} (${t.name})`))}.`,
+          }),
+        );
+      });
+
+    /**
+     * Accept `me`, a UUID, a display name, a full name, or an email.
+     *
+     * `me` working only on `issues --assignee` was the root of a whole class of
+     * bugs: every other call site needed a UUID, so scripts carried a
+     * `$MY_UUID` that silently expanded to nothing when unset.
+     */
+    const resolveUserId = (value: string): Effect.Effect<string, ServiceError> =>
+      Effect.gen(function* () {
+        const wanted = value.trim().toLowerCase();
+        if (wanted === "me") return yield* viewerId;
+        if (UUID.test(wanted)) return value.trim();
+        const users = yield* allUsers;
+        const matches = users.filter(
+          (u) =>
+            u.email.toLowerCase() === wanted ||
+            u.displayName.toLowerCase() === wanted ||
+            u.name.toLowerCase() === wanted,
+        );
+        if (matches.length === 1) return matches[0]!.id;
+        if (matches.length === 0) {
+          return yield* Effect.fail(
+            new ValidationError({
+              operation: "resolveUser",
+              field: "assignee",
+              message:
+                `no user matches '${value}'. Use 'me', an email, a display ` +
+                `name, or a user id — see \`linear users\`.`,
+            }),
+          );
+        }
+        return yield* Effect.fail(
+          new ValidationError({
+            operation: "resolveUser",
+            field: "assignee",
+            message:
+              `'${value}' matches ${matches.length} users ` +
+              `(${listOf(matches.map((u) => u.email))}). Use the email or id.`,
+          }),
+        );
+      });
+
+    const listStates = (teamKey?: string) =>
+      Effect.gen(function* () {
+        const states = yield* allStates;
+        const team = teamKey ? yield* resolveTeam(teamKey) : undefined;
+        const scoped = team
+          ? states.filter((s) => s.teamKey === team.key)
+          : states;
+        return complete(
+          [...scoped].sort(
+            (a, b) =>
+              (a.teamKey ?? "").localeCompare(b.teamKey ?? "") ||
+              a.position - b.position,
+          ),
+        );
+      });
+
+    const listTeams = () =>
+      Effect.map(allTeams, (teams) =>
+        complete([...teams].sort((a, b) => a.key.localeCompare(b.key))),
+      );
+
+    /**
+     * Accept a workflow state name (`In Progress`) or its UUID.
+     *
+     * State names repeat across teams, so a name is only unambiguous once the
+     * team is known — hence `teamKey`. Callers that have an issue in hand pass
+     * the issue's own team, which is why `update --state "In Progress"` works
+     * without the caller naming a team at all.
+     */
+    const resolveStateId = (
+      value: string,
+      teamKey?: string,
+    ): Effect.Effect<string, ServiceError> =>
+      Effect.gen(function* () {
+        const trimmed = value.trim();
+        if (UUID.test(trimmed)) return trimmed;
+        const states = yield* allStates;
+        const wanted = trimmed.toLowerCase();
+        const inScope = teamKey
+          ? states.filter((s) => s.teamKey === teamKey)
+          : states;
+        const matches = inScope.filter(
+          (s) => s.name.toLowerCase() === wanted,
+        );
+        if (matches.length === 1) return matches[0]!.id;
+        if (matches.length === 0) {
+          const where = teamKey ? ` in team ${teamKey}` : "";
+          return yield* Effect.fail(
+            new ValidationError({
+              operation: "resolveState",
+              field: "state",
+              message:
+                `no workflow state named '${value}'${where}. Available: ` +
+                `${listOf([...new Set(inScope.map((s) => s.name))])}. ` +
+                "Run `linear states` to see them with their ids.",
+            }),
+          );
+        }
+        return yield* Effect.fail(
+          new ValidationError({
+            operation: "resolveState",
+            field: "state",
+            message:
+              `'${value}' exists in ${matches.length} teams ` +
+              `(${listOf(matches.map((s) => s.teamKey ?? "?"))}). Pass --team.`,
+          }),
+        );
+      });
+
+    // ============================================
+    // Issues
+    // ============================================
+
+    const buildIssueFilter = (filter?: IssueFilter) =>
       Effect.gen(function* () {
         const queryFilter: IssueQueryFilter = {};
         if (filter?.assignee) {
-          const id =
-            filter.assignee === "me" ? yield* viewerId : filter.assignee;
-          queryFilter.assignee = { id: { eq: id } };
+          queryFilter.assignee = {
+            id: { eq: yield* resolveUserId(filter.assignee) },
+          };
         }
         if (filter?.state) queryFilter.state = stateFilter(filter.state);
-        if (filter?.team) queryFilter.team = { key: { eq: filter.team } };
+        if (filter?.team) {
+          queryFilter.team = { key: { eq: (yield* resolveTeam(filter.team)).key } };
+        }
         if (filter?.project) queryFilter.project = { id: { eq: filter.project } };
         if (filter?.cycle) queryFilter.cycle = { id: { eq: filter.cycle } };
         // Labels filter by name rather than id: a label only earns its keep if
@@ -245,24 +604,91 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
         if (filter?.label) {
           queryFilter.labels = { name: { eqIgnoreCase: filter.label } };
         }
-        return yield* call("listIssues", (client) =>
-          collectIssues(client, queryFilter, filter?.limit ?? PAGE_SIZE),
+        return queryFilter;
+      });
+
+    const listIssues = (filter?: IssueFilter) =>
+      Effect.gen(function* () {
+        const queryFilter = yield* buildIssueFilter(filter);
+        return yield* collectPaged(
+          filter?.limit ?? PAGE_SIZE,
+          (first, after) =>
+            raw<IssueListResponse>("listIssues", ISSUE_LIST_QUERY, {
+              filter: queryFilter,
+              first,
+              after,
+            }).pipe(Effect.map((r) => ({ connection: r.issues }))),
+          summaryOf,
         );
       });
 
     const getIssue = (identifier: string) =>
-      call("getIssue", async (client) => toDetail(await client.issue(identifier)));
+      raw<IssueDetailResponse>("getIssue", ISSUE_DETAIL_QUERY, {
+        id: identifier,
+      }).pipe(Effect.map((r) => detailOf(r.issue)));
+
+    const searchIssues = (query: string, limit = PAGE_SIZE) =>
+      collectPaged(
+        limit,
+        (first, after) =>
+          raw<IssueSearchResponse>("searchIssues", ISSUE_SEARCH_QUERY, {
+            term: query,
+            first,
+            after,
+          }).pipe(
+            Effect.map((r) => ({
+              connection: r.searchIssues,
+              totalCount: r.searchIssues.totalCount,
+            })),
+          ),
+        summaryOf,
+      );
+
+    const getViewIssues = (viewId: string, limit = PAGE_SIZE) =>
+      collectPaged(
+        limit,
+        (first, after) =>
+          raw<ViewIssuesResponse>("getViewIssues", VIEW_ISSUES_QUERY, {
+            id: viewId,
+            first,
+            after,
+          }).pipe(Effect.map((r) => ({ connection: r.customView.issues }))),
+        summaryOf,
+      );
+
+    /**
+     * Every comment on one issue, in order, with its thread structure.
+     *
+     * The alternative — diffing per-author comment streams — cannot see a
+     * reply's parent, misses anyone outside the set of authors you thought to
+     * query, and silently drops whatever a `--limit` cut off. Reading the issue
+     * itself has none of those failure modes.
+     */
+    const getIssueComments = (identifier: string, limit = PAGE_SIZE) =>
+      collectPaged(
+        limit,
+        (first, after) =>
+          raw<IssueCommentsResponse>("getIssueComments", ISSUE_COMMENTS_QUERY, {
+            id: identifier,
+            first,
+            after,
+          }).pipe(Effect.map((r) => ({ connection: r.issue.comments }))),
+        commentOf,
+      );
+
+    // ============================================
+    // Labels
+    // ============================================
 
     /**
      * Every label available, optionally scoped to one team.
      *
      * Exists so labels can be referred to by name everywhere else. Without a
-     * way to list them, `--label` would mean "paste a UUID", which is the same
-     * papercut `--state` still has.
+     * way to list them, `--label` would mean "paste a UUID".
      */
-    const listLabels = (teamKey?: string) =>
+    const fetchLabels = (teamKey?: string) =>
       call("listLabels", async (client): Promise<IssueLabel[]> => {
-        const result = await client.issueLabels({ first: 250 });
+        const result = await client.issueLabels({ first: BULK_PAGE_SIZE });
         const labels = await Promise.all(
           result.nodes.map(async (label) => {
             const [team, parent] = await Promise.all([label.team, label.parent]);
@@ -283,6 +709,11 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
           .sort((a, b) => a.name.localeCompare(b.name));
       });
 
+    const allLabels = yield* Effect.cached(fetchLabels());
+
+    const listLabels = (teamKey?: string) =>
+      Effect.map(fetchLabels(teamKey), (labels) => complete(labels));
+
     /** Create a label. Idempotent by name — returns the existing one if it exists. */
     const createLabel = (input: {
       readonly name: string;
@@ -291,7 +722,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
       readonly description?: string;
     }) =>
       Effect.gen(function* () {
-        const existing = yield* listLabels();
+        const existing = yield* allLabels;
         const match = existing.find(
           (l) => l.name.toLowerCase() === input.name.trim().toLowerCase(),
         );
@@ -313,7 +744,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
     const resolveLabelIds = (names: readonly string[]) =>
       Effect.gen(function* () {
         if (names.length === 0) return [] as string[];
-        const all = yield* listLabels();
+        const all = yield* allLabels;
         const byName = new Map(all.map((l) => [l.name.toLowerCase(), l.id]));
         const ids: string[] = [];
         const missing: string[] = [];
@@ -337,7 +768,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
       });
 
     /**
-     * Add or remove labels without disturbing the others.
+     * Add or remove labels on one issue without disturbing the others.
      *
      * `updateIssue` takes `labelIds` as the *complete* set, so passing one label
      * silently strips every other label the issue had. That is a data-losing
@@ -351,20 +782,22 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
       Effect.gen(function* () {
         const addIds = yield* resolveLabelIds(opts.add ?? []);
         const removeIds = yield* resolveLabelIds(opts.remove ?? []);
-        return yield* call("changeLabels", async (client) => {
+        yield* call("changeLabels", async (client) => {
           const issue = await client.issue(identifier);
           const current = await issue.labels();
           const next = new Set(current.nodes.map((l) => l.id));
           for (const id of removeIds) next.delete(id);
           for (const id of addIds) next.add(id);
-          const result = await client.updateIssue(issue.id, {
-            labelIds: [...next],
-          });
-          const updated = await result.issue;
-          if (!updated) throw new Error("Issue not returned after label change");
-          return toDetail(updated);
+          await client.updateIssue(issue.id, { labelIds: [...next] });
         });
+        // Re-read rather than trusting the mutation's echo: the detail query is
+        // the one place the full issue shape is defined.
+        return yield* getIssue(identifier);
       });
+
+    // ============================================
+    // Writes
+    // ============================================
 
     /**
      * Link a Slack thread to an issue as a rich attachment.
@@ -440,8 +873,8 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
         const result = await client.createIssue(arg);
         const issue = await result.issue;
         if (!issue) throw new Error("Issue not returned after creation");
-        return toDetail(issue);
-      });
+        return issue.identifier;
+      }).pipe(Effect.flatMap(getIssue));
 
     const updateIssue = (issueId: string, input: UpdateIssueInput) =>
       call("updateIssue", async (client) => {
@@ -461,14 +894,68 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
         const result = await client.updateIssue(issueId, arg);
         const issue = await result.issue;
         if (!issue) throw new Error("Issue not returned after update");
-        return toDetail(issue);
+        return issue.identifier;
+      }).pipe(Effect.flatMap(getIssue));
+
+    /**
+     * Turn the human vocabulary of `linear update` into API ids, for one issue.
+     *
+     * A state name is only meaningful within a team, so the issue is fetched
+     * first — but *only* when a name was actually given. Passing a state id, or
+     * no state at all, costs nothing extra.
+     */
+    const resolveIssueUpdate = (
+      identifier: string,
+      request: UpdateIssueRequest,
+    ): Effect.Effect<UpdateIssueInput, ServiceError> =>
+      Effect.gen(function* () {
+        const needsTeam =
+          request.state !== undefined && !UUID.test(request.state.trim());
+        const teamKey = needsTeam
+          ? (yield* getIssue(identifier)).teamKey
+          : undefined;
+        return {
+          title: request.title,
+          description: request.description,
+          priority: request.priority,
+          estimate: request.estimate,
+          dueDate: request.dueDate,
+          projectId: request.project,
+          cycleId: request.cycle,
+          projectMilestoneId: request.milestone,
+          stateId: request.state
+            ? yield* resolveStateId(request.state, teamKey)
+            : undefined,
+          assigneeId: request.assignee
+            ? yield* resolveUserId(request.assignee)
+            : undefined,
+        } satisfies UpdateIssueInput;
       });
 
-    const searchIssues = (query: string, limit = PAGE_SIZE) =>
-      call("searchIssues", async (client) => {
-        const result = await client.searchIssues(query, { first: limit });
-        return Promise.all(result.nodes.map(toSummary));
-      });
+    /**
+     * Apply one change to several issues.
+     *
+     * Sequential on purpose. The morning routine's unlabel/label/move sequence
+     * is dozens of writes; firing them concurrently is the quickest way to
+     * spend the hourly budget and leave the batch half-applied.
+     */
+    const updateIssues = (
+      identifiers: readonly string[],
+      request: UpdateIssueRequest,
+    ): Effect.Effect<Paged<IssueDetail>, ServiceError> =>
+      Effect.forEach(identifiers, (identifier) =>
+        resolveIssueUpdate(identifier, request).pipe(
+          Effect.flatMap((input) => updateIssue(identifier, input)),
+        ),
+      ).pipe(Effect.map((issues) => complete(issues)));
+
+    const changeLabelsOn = (
+      identifiers: readonly string[],
+      opts: { readonly add?: readonly string[]; readonly remove?: readonly string[] },
+    ): Effect.Effect<Paged<IssueDetail>, ServiceError> =>
+      Effect.forEach(identifiers, (identifier) =>
+        changeLabels(identifier, opts),
+      ).pipe(Effect.map((issues) => complete(issues)));
 
     const addComment = (issueId: string, body: string) =>
       call("addComment", async (client) => {
@@ -476,6 +963,48 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
         const comment = await result.comment;
         return comment?.id ?? "created";
       });
+
+    /**
+     * Create a saved view from the same filter vocabulary `linear issues` uses.
+     *
+     * Set-up used to end with "now go make this view in the UI", which is the
+     * one step a script cannot check and a new starter always gets subtly
+     * different from everyone else's.
+     */
+    const createView = (input: {
+      readonly name: string;
+      readonly description?: string;
+      readonly teamId?: string;
+      readonly shared?: boolean;
+      readonly filter?: IssueFilter;
+    }) =>
+      Effect.gen(function* () {
+        const filterData = input.filter
+          ? yield* buildIssueFilter(input.filter)
+          : undefined;
+        return yield* call("createView", async (client) => {
+          const arg: CreateCustomViewArg = {
+            name: input.name,
+            description: input.description,
+            teamId: input.teamId,
+            shared: input.shared ?? true,
+            filterData,
+          };
+          const result = await client.createCustomView(arg);
+          const view = await result.customView;
+          if (!view) throw new Error("View not returned after creation");
+          return {
+            id: view.id,
+            name: view.name,
+            slugId: view.slugId,
+            shared: view.shared,
+          } satisfies CreatedView;
+        });
+      });
+
+    // ============================================
+    // Inbox
+    // ============================================
 
     const buildNotification = async (
       n: NotificationNode,
@@ -520,6 +1049,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
         const limit = filter?.limit ?? PAGE_SIZE;
         const notifications: Notification[] = [];
         let cursor: string | null = null;
+        let hasMore = false;
 
         while (notifications.length < limit) {
           const page = await client.notifications({
@@ -535,12 +1065,13 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
             notifications.push(built);
             if (notifications.length >= limit) break;
           }
-          if (!page.pageInfo.hasNextPage) break;
+          hasMore = page.pageInfo.hasNextPage;
+          if (!hasMore) break;
           cursor = page.pageInfo.endCursor ?? null;
           if (!cursor) break;
         }
 
-        return summariseInbox(notifications);
+        return summariseInbox(notifications, limit, hasMore);
       });
 
     const markNotificationRead = (id: string) =>
@@ -583,46 +1114,19 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
         return { archived: ids.length, found: ids.length };
       });
 
-    const listUsers = () =>
-      call("listUsers", async (client) => {
-        const users: LinearUser[] = [];
-        let cursor: string | null = null;
-        let more = true;
-        while (more) {
-          const page = await client.users({
-            first: PAGE_SIZE,
-            ...(cursor ? { after: cursor } : {}),
-          });
-          for (const u of page.nodes) {
-            users.push({
-              id: u.id,
-              name: u.name,
-              email: u.email,
-              displayName: u.displayName,
-              active: u.active,
-              admin: u.admin,
-              createdAt: u.createdAt,
-            });
-          }
-          more = page.pageInfo.hasNextPage;
-          cursor = page.pageInfo.endCursor ?? null;
-          if (!cursor) more = false;
-        }
-        return users;
-      });
+    // ============================================
+    // Users
+    // ============================================
 
     const getUserIssues = (userId: string, state?: string, limit = 100) =>
-      call("getUserIssues", (client) => {
-        const queryFilter: IssueQueryFilter = { assignee: { id: { eq: userId } } };
-        if (state) queryFilter.state = stateFilter(state);
-        return collectIssues(client, queryFilter, limit);
-      });
+      listIssues({ assignee: userId, state, limit });
 
-    const getUserComments = (userId: string, since?: string, limit = 100) =>
+    const getUserComments = (userId: string, since?: Date, limit = 100) =>
       call("getUserComments", async (client) => {
-        const sinceTs = since ? new Date(since).getTime() : 0;
+        const sinceTs = since?.getTime();
         const comments: Comment[] = [];
         let cursor: string | null = null;
+        let hasNextPage = false;
         while (comments.length < limit) {
           const page = await client.comments({
             filter: { user: { id: { eq: userId } } },
@@ -630,57 +1134,85 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
             ...(cursor ? { after: cursor } : {}),
           });
           for (const c of page.nodes) {
-            if (sinceTs && c.createdAt.getTime() < sinceTs) continue;
-            const issue = await c.issue;
+            if (sinceTs !== undefined && c.createdAt.getTime() < sinceTs) continue;
+            const [issue, user] = await Promise.all([c.issue, c.user]);
             comments.push({
               id: c.id,
               body: c.body,
               createdAt: c.createdAt,
               updatedAt: c.updatedAt,
+              authorId: user?.id,
+              author: user?.displayName ?? user?.name,
               issueId: issue?.id,
               issueIdentifier: issue?.identifier,
               issueTitle: issue?.title,
             });
             if (comments.length >= limit) break;
           }
-          if (!page.pageInfo.hasNextPage) break;
+          hasNextPage = page.pageInfo.hasNextPage;
+          if (!hasNextPage) break;
           cursor = page.pageInfo.endCursor ?? null;
           if (!cursor) break;
         }
-        return comments;
+        return {
+          items: comments,
+          pageInfo: pageInfoOf({
+            returned: comments.length,
+            limit,
+            hasNextPage,
+          }),
+        } satisfies Paged<Comment>;
       });
 
-    const getUserActivity = (userId: string, since?: string) =>
+    const getUserActivity = (userId: string, since?: Date) =>
       call("getUserActivity", (client) =>
         collectUserActivity(client, userId, since),
       );
 
     const getIssueHistory = (issueId: string) =>
-      call("getIssueHistory", (client) => collectIssueHistory(client, issueId));
+      call("getIssueHistory", (client) =>
+        collectIssueHistory(client, issueId),
+      ).pipe(Effect.map((entries) => complete(entries)));
+
+    // ============================================
+    // Projects / documents / views / cycles
+    // ============================================
 
     const listProjects = (teamKey?: string, limit = PAGE_SIZE) =>
-      call("listProjects", async (client) => {
-        const result = await client.projects({ first: 100 });
-        const projects: ProjectSummary[] = [];
-        for (const project of result.nodes) {
-          const teams = await project.teams();
-          const team = teams.nodes[0];
-          if (!team) continue;
-          if (teamKey && team.key !== teamKey) continue;
-          projects.push({
-            id: project.id,
-            name: project.name,
-            teamKey: team.key,
-            teamId: team.id,
-            state: project.state,
-            updatedAt: project.updatedAt.toISOString(),
-          });
-        }
-        projects.sort(
-          (a, b) =>
-            new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
-        );
-        return projects.slice(0, limit);
+      Effect.gen(function* () {
+        const team = teamKey ? yield* resolveTeam(teamKey) : undefined;
+        return yield* call("listProjects", async (client) => {
+          const result = await client.projects({ first: 100 });
+          const projects: ProjectSummary[] = [];
+          for (const project of result.nodes) {
+            const teams = await project.teams();
+            const first = teams.nodes[0];
+            if (!first) continue;
+            if (team && first.key !== team.key) continue;
+            projects.push({
+              id: project.id,
+              name: project.name,
+              teamKey: first.key,
+              teamId: first.id,
+              state: project.state,
+              updatedAt: project.updatedAt.toISOString(),
+            });
+          }
+          projects.sort(
+            (a, b) =>
+              new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+          );
+          const items = projects.slice(0, limit);
+          return {
+            items,
+            pageInfo: pageInfoOf({
+              returned: items.length,
+              limit,
+              hasNextPage: projects.length > limit,
+              totalCount: projects.length,
+            }),
+          } satisfies Paged<ProjectSummary>;
+        });
       });
 
     const getProject = (projectId: string) =>
@@ -790,7 +1322,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
             }),
           )
           .sort((a, b) => a.position - b.position);
-      });
+      }).pipe(Effect.map((statuses) => complete(statuses)));
 
     const updateProject = (
       id: string,
@@ -877,34 +1409,45 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
           });
         }
         return views;
-      });
-
-    const getViewIssues = (viewId: string, limit = PAGE_SIZE) =>
-      call("getViewIssues", async (client) => {
-        const view = await client.customView(viewId);
-        const result = await view.issues({ first: limit });
-        return Promise.all(result.nodes.map(toSummary));
-      });
+      }).pipe(Effect.map((views) => complete(views)));
 
     const listFavorites = () =>
-      call("listFavorites", (client) => collectFavorites(client));
+      call("listFavorites", (client) => collectFavorites(client)).pipe(
+        Effect.map((favorites) => complete(favorites)),
+      );
 
-    const listCycles = (teamId: string, type?: "current" | "previous" | "next") =>
-      call("listCycles", (client) => collectCycles(client, teamId, type));
+    const listCycles = (team: string, type?: "current" | "previous" | "next") =>
+      Effect.gen(function* () {
+        const resolved = yield* resolveTeam(team);
+        const cycles = yield* call("listCycles", (client) =>
+          collectCycles(client, resolved.id, type),
+        );
+        return complete(cycles);
+      });
 
     return {
       whoami,
       listIssues,
       getIssue,
+      getIssueComments,
       createIssue,
       listLabels,
       createLabel,
       resolveLabelIds,
+      resolveStateId,
+      resolveTeam,
+      resolveUserId,
+      listStates,
+      listTeams,
       changeLabels,
+      changeLabelsOn,
       linkSlackThread,
       updateIssue,
+      updateIssues,
+      resolveIssueUpdate,
       searchIssues,
       addComment,
+      createView,
       getInbox,
       markNotificationRead,
       markAllNotificationsRead,
@@ -957,7 +1500,11 @@ export const verifyApiKey = (
 // Module-level helpers (kept out of the service generator for readability)
 // ============================================
 
-const summariseInbox = (notifications: Notification[]): Inbox => {
+const summariseInbox = (
+  notifications: Notification[],
+  limit: number,
+  hasNextPage: boolean,
+): Inbox => {
   const byCategory = Object.fromEntries(
     ALL_NOTIFICATION_CATEGORIES.map((cat) => [
       cat,
@@ -970,20 +1517,25 @@ const summariseInbox = (notifications: Notification[]): Inbox => {
       unread: notifications.filter((n) => !n.readAt).length,
       byCategory,
     },
+    pageInfo: pageInfoOf({
+      returned: notifications.length,
+      limit,
+      hasNextPage,
+    }),
     notifications,
   };
 };
 
-const defaultSince = (): string =>
-  new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+const defaultSince = (): Date =>
+  new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
 const collectUserActivity = async (
   client: LinearClient,
   userId: string,
-  sinceDate?: string,
+  sinceDate?: Date,
 ): Promise<UserActivity> => {
   const since = sinceDate ?? defaultSince();
-  const sinceTs = new Date(since).getTime();
+  const sinceTs = since.getTime();
   const activities: Activity[] = [];
 
   const stateMap = new Map<string, string>();
@@ -1070,7 +1622,7 @@ const collectUserActivity = async (
 
   return {
     userId,
-    sinceDate: since,
+    sinceDate: since.toISOString(),
     byDay,
     summary: {
       totalActivities: activities.length,

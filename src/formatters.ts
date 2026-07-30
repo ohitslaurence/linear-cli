@@ -2,19 +2,27 @@ import type {
   Comment,
   CreatedDocument,
   CreatedProject,
+  CreatedView,
   Cycle,
   CustomView,
+  DryRunReport,
   Favorite,
   HistoryEntry,
   Inbox,
+  IssueComment,
   IssueDetail,
+  IssueLabel,
   IssueSummary,
   LinearUser,
+  PageInfo,
+  Paged,
   ProjectMilestone,
   ProjectStatus,
   ProjectSummary,
+  TeamSummary,
   UpdatedProject,
   UserActivity,
+  WorkflowState,
 } from "./types";
 
 /**
@@ -54,20 +62,80 @@ const formatDate = (date: Date | string | undefined): string => {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 };
 
+/**
+ * Date *and* time, for anything ordered within a day.
+ *
+ * A four-hour response target cannot be judged against "Jul 30" on both the
+ * question and the answer.
+ */
+const formatDateTime = (date: Date | string | undefined): string => {
+  if (!date) return "-";
+  const d = date instanceof Date ? date : new Date(date);
+  return d.toISOString().replace("T", " ").slice(0, 16) + "Z";
+};
+
 /** Stable machine-readable serialisation used by every command's `--json`. */
 export const toJson = (data: unknown): string => JSON.stringify(data, null, 2);
 
-export const formatIssueListCSV = (issues: readonly IssueSummary[]): string => {
+/**
+ * The "you are not seeing everything" line, appended to any truncated list.
+ *
+ * `--json` callers read `pageInfo.truncated`; a human reading CSV in a terminal
+ * gets no such field, and a quietly-short list is exactly as misleading there.
+ */
+const truncationNote = (page: PageInfo): string | undefined => {
+  if (!page.truncated) return undefined;
+  const total =
+    page.totalCount !== undefined ? ` of ${page.totalCount} matching` : "";
+  return `\n(showing ${page.returned}${total} — more remain; raise --limit to see them)`;
+};
+
+/** Append the truncation note, if there is one, to a rendered list. */
+const withPageNote = <T>(paged: Paged<T>, body: string): string =>
+  body + (truncationNote(paged.pageInfo) ?? "");
+
+export const formatIssueListCSV = (paged: Paged<IssueSummary>): string => {
+  const issues = paged.items;
   if (issues.length === 0) return "No issues found.";
-  const header = "id,title,state,priority,team";
+  const header = "id,title,state,assignee,due,labels,priority,team";
   const rows = issues.map((i) =>
     [
       i.identifier,
       escapeField(i.title),
       escapeField(i.state),
+      escapeField(i.assignee),
+      i.dueDate ?? "-",
+      escapeField(i.labels.join(" ")),
       formatPriority(i.priority),
-      escapeField(i.team),
+      escapeField(i.teamKey ?? i.team),
     ].join(","),
+  );
+  return withPageNote(paged, [header, ...rows].join("\n"));
+};
+
+export const formatStatesCSV = (paged: Paged<WorkflowState>): string => {
+  if (paged.items.length === 0) return "No workflow states found.";
+  const header = "team,name,type,id";
+  const rows = paged.items.map((s) =>
+    [s.teamKey ?? "-", escapeField(s.name), s.type, s.id].join(","),
+  );
+  return [header, ...rows].join("\n");
+};
+
+export const formatTeamsCSV = (paged: Paged<TeamSummary>): string => {
+  if (paged.items.length === 0) return "No teams found.";
+  const header = "key,name,id";
+  const rows = paged.items.map((t) =>
+    [t.key, escapeField(t.name), t.id].join(","),
+  );
+  return [header, ...rows].join("\n");
+};
+
+export const formatLabelsCSV = (paged: Paged<IssueLabel>): string => {
+  if (paged.items.length === 0) return "No labels found.";
+  const header = "name,group,id";
+  const rows = paged.items.map((l) =>
+    [escapeField(l.name), escapeField(l.group), l.id].join(","),
   );
   return [header, ...rows].join("\n");
 };
@@ -89,6 +157,26 @@ export const formatIssueDetail = (issue: IssueDetail): string => {
   if (issue.estimate) lines.push(`Estimate: ${issue.estimate} pts`);
   if (issue.dueDate) lines.push(`Due: ${issue.dueDate}`);
   if (issue.labels.length > 0) lines.push(`Labels: ${issue.labels.join(", ")}`);
+
+  // Sub-issues come before the links: a ticket with children is a container,
+  // and knowing that changes whether the rest of the page is worth reading.
+  if (issue.children.length > 0) {
+    lines.push("");
+    lines.push(`Sub-issues (${issue.children.length}):`);
+    for (const child of issue.children) {
+      lines.push(`  ${child.identifier} [${child.state ?? "-"}] ${child.title}`);
+    }
+  }
+
+  if (issue.attachments.length > 0) {
+    lines.push("");
+    lines.push("Links:");
+    for (const a of issue.attachments) {
+      const source = a.sourceType ? `${a.sourceType}: ` : "";
+      lines.push(`  ${source}${a.title || a.url}`);
+      if (a.title) lines.push(`    ${a.url}`);
+    }
+  }
 
   lines.push("");
   lines.push(`Created: ${formatDate(issue.createdAt)} by ${issue.creator || "-"}`);
@@ -112,6 +200,83 @@ export const formatCreatedIssue = (issue: IssueDetail): string =>
   `Created: ${issue.identifier} - ${issue.title}\nURL: ${issue.url}`;
 
 export const formatComment = (id: string): string => `Comment added: ${id}`;
+
+export const formatCreatedView = (view: CreatedView): string =>
+  [
+    `Created view: ${view.name}`,
+    `ID: ${view.id}`,
+    `Visibility: ${view.shared ? "shared with the workspace" : "private"}`,
+  ].join("\n");
+
+/**
+ * One issue's comments, threaded.
+ *
+ * Replies are indented under the comment they answer, because a flat list of
+ * an exchange reads as agreement when it may have been a correction.
+ */
+export const formatIssueComments = (paged: Paged<IssueComment>): string => {
+  const comments = paged.items;
+  if (comments.length === 0) return "No comments on this issue.";
+
+  const replies = new Map<string, IssueComment[]>();
+  const roots: IssueComment[] = [];
+  for (const c of comments) {
+    if (c.parentId === undefined) {
+      roots.push(c);
+      continue;
+    }
+    const siblings = replies.get(c.parentId) ?? [];
+    siblings.push(c);
+    replies.set(c.parentId, siblings);
+  }
+
+  const render = (c: IssueComment, depth: number): string[] => {
+    const pad = "  ".repeat(depth);
+    const head = `${pad}${formatDateTime(c.createdAt)} — ${c.author ?? "unknown"}${
+      c.resolvedAt ? " (resolved)" : ""
+    }`;
+    const body = c.body
+      .trim()
+      .split("\n")
+      .map((line) => `${pad}  ${line}`);
+    return [head, ...body, "", ...(replies.get(c.id) ?? []).flatMap((r) => render(r, depth + 1))];
+  };
+
+  const orphans = comments.filter(
+    (c) => c.parentId !== undefined && !comments.some((p) => p.id === c.parentId),
+  );
+
+  const lines = [
+    `${comments.length} comment(s)`,
+    "",
+    ...roots.flatMap((c) => render(c, 0)),
+    // A reply whose parent fell outside the page would otherwise vanish
+    // entirely — worse than showing it unattached.
+    ...orphans.flatMap((c) => render(c, 0)),
+  ];
+  return withPageNote(paged, lines.join("\n").trimEnd());
+};
+
+const formatFields = (fields: object): string[] =>
+  Object.entries(fields)
+    .filter((entry): entry is [string, unknown] => entry[1] !== undefined)
+    .map(([k, v]) => `  ${k}: ${Array.isArray(v) ? v.join(", ") : String(v)}`);
+
+export const formatDryRun = (report: DryRunReport): string => {
+  const requested = formatFields(report.requested);
+  const lines = [
+    "DRY RUN — nothing was written.",
+    `Operation: ${report.operation}`,
+    `Targets (${report.targets.length}): ${report.targets.join(", ")}`,
+    requested.length > 0 ? "Requested:" : "Requested: (nothing)",
+    ...requested,
+  ];
+  for (const [index, resolved] of report.resolved.entries()) {
+    lines.push(`Would send to ${report.targets[index] ?? "?"}:`);
+    lines.push(...formatFields(resolved));
+  }
+  return lines.join("\n");
+};
 
 export const formatInboxCSV = (inbox: Inbox): string => {
   const lines: string[] = [
@@ -137,7 +302,7 @@ export const formatInboxCSV = (inbox: Inbox): string => {
       ].join(","),
     );
   }
-  return lines.join("\n");
+  return lines.join("\n") + (truncationNote(inbox.pageInfo) ?? "");
 };
 
 export const formatUsersCSV = (users: readonly LinearUser[]): string => {
@@ -155,19 +320,32 @@ export const formatUsersCSV = (users: readonly LinearUser[]): string => {
   return [header, ...rows].join("\n");
 };
 
-export const formatCommentsCSV = (comments: readonly Comment[]): string => {
-  if (comments.length === 0) return "No comments found.";
-  const header = "date,issue,body";
-  const rows = comments.map((c) => {
+export const formatCommentsCSV = (paged: Paged<Comment>): string => {
+  if (paged.items.length === 0) return "No comments found.";
+  const header = "date,issue,author,body";
+  const rows = paged.items.map((c) => {
     const body = c.body.length > 100 ? c.body.slice(0, 100) + "..." : c.body;
     return [
-      formatDate(c.createdAt),
+      formatDateTime(c.createdAt),
       escapeField(c.issueIdentifier),
+      escapeField(c.author),
       escapeField(body.replace(/\n/g, " ")),
     ].join(",");
   });
-  return [header, ...rows].join("\n");
+  return withPageNote(paged, [header, ...rows].join("\n"));
 };
+
+export const formatViewer = (viewer: {
+  readonly id: string;
+  readonly name: string;
+  readonly email: string;
+  readonly displayName: string;
+}): string =>
+  [
+    `${viewer.name} <${viewer.email}>`,
+    `Display name: ${viewer.displayName}`,
+    `User id: ${viewer.id}`,
+  ].join("\n");
 
 export const formatActivityByDay = (activity: UserActivity): string => {
   const lines: string[] = [
@@ -202,9 +380,8 @@ export const formatActivityByDay = (activity: UserActivity): string => {
   return lines.join("\n").trim();
 };
 
-export const formatHistoryEntries = (
-  entries: readonly HistoryEntry[],
-): string => {
+export const formatHistoryEntries = (paged: Paged<HistoryEntry>): string => {
+  const entries = paged.items;
   if (entries.length === 0) return "No history entries found.";
   const lines: string[] = [`History (${entries.length} entries)`, ""];
 
@@ -234,17 +411,15 @@ export const formatHistoryEntries = (
   return lines.join("\n");
 };
 
-export const formatProjectsCSV = (
-  projects: readonly ProjectSummary[],
-): string => {
-  if (projects.length === 0) return "No projects found.";
+export const formatProjectsCSV = (paged: Paged<ProjectSummary>): string => {
+  if (paged.items.length === 0) return "No projects found.";
   const header = "id,name,team,state,updated";
-  const rows = projects.map((p) =>
+  const rows = paged.items.map((p) =>
     [p.id, escapeField(p.name), p.teamKey, p.state, formatDate(p.updatedAt)].join(
       ",",
     ),
   );
-  return [header, ...rows].join("\n");
+  return withPageNote(paged, [header, ...rows].join("\n"));
 };
 
 export const formatProjectDetail = (
@@ -275,12 +450,10 @@ export const formatProjectDetail = (
   return lines.join("\n");
 };
 
-export const formatProjectStatuses = (
-  statuses: readonly ProjectStatus[],
-): string => {
-  if (statuses.length === 0) return "No project statuses found.";
+export const formatProjectStatuses = (paged: Paged<ProjectStatus>): string => {
+  if (paged.items.length === 0) return "No project statuses found.";
   const header = "id,name,type,position";
-  const rows = statuses.map((s) =>
+  const rows = paged.items.map((s) =>
     [s.id, escapeField(s.name), s.type, s.position].join(","),
   );
   return [header, ...rows].join("\n");
@@ -320,10 +493,10 @@ export const formatProjectUpdatePosted = (id: string): string =>
 export const formatCreatedDocument = (doc: CreatedDocument): string =>
   `Created: ${doc.title}\nURL: ${doc.url}`;
 
-export const formatViewsCSV = (views: readonly CustomView[]): string => {
-  if (views.length === 0) return "No views found.";
+export const formatViewsCSV = (paged: Paged<CustomView>): string => {
+  if (paged.items.length === 0) return "No views found.";
   const header = "id,name,shared,owner";
-  const rows = views.map((v) =>
+  const rows = paged.items.map((v) =>
     [
       v.id,
       escapeField(v.name),
@@ -334,10 +507,10 @@ export const formatViewsCSV = (views: readonly CustomView[]): string => {
   return [header, ...rows].join("\n");
 };
 
-export const formatFavoritesCSV = (favorites: readonly Favorite[]): string => {
-  if (favorites.length === 0) return "No favorites found.";
+export const formatFavoritesCSV = (paged: Paged<Favorite>): string => {
+  if (paged.items.length === 0) return "No favorites found.";
   const header = "id,type,title,viewId,projectId,cycleId";
-  const rows = favorites.map((f) =>
+  const rows = paged.items.map((f) =>
     [
       f.id,
       f.type,
@@ -350,10 +523,10 @@ export const formatFavoritesCSV = (favorites: readonly Favorite[]): string => {
   return [header, ...rows].join("\n");
 };
 
-export const formatCycles = (cycles: readonly Cycle[]): string => {
-  if (cycles.length === 0) return "No cycles found.";
+export const formatCycles = (paged: Paged<Cycle>): string => {
+  if (paged.items.length === 0) return "No cycles found.";
   const header = "id,number,name,starts,ends,completed,total,progress";
-  const rows = cycles.map((c) =>
+  const rows = paged.items.map((c) =>
     [
       c.id,
       c.number,

@@ -1,25 +1,26 @@
-import { Args, Command, Options } from "@effect/cli";
+import { Command, Options } from "@effect/cli";
 import { Effect } from "effect";
 import { Linear } from "../client";
 import * as fmt from "../formatters";
-import { jsonOption, orUndef, render } from "./common";
+import { jsonOption, orUndef, render, textArg } from "./common";
 
 const cycles = Command.make(
   "cycles",
   {
     json: jsonOption,
-    teamId: Args.text({ name: "team-id" }).pipe(
-      Args.withDescription("Team id."),
-    ),
+    // Takes a key, name or id like every other team argument. It used to
+    // require the UUID while `issues --team` required the key, and passing the
+    // wrong one returned an empty list rather than an error.
+    team: textArg("team", "Team key (SPR), name, or id."),
     type: Options.choice("type", ["current", "previous", "next"]).pipe(
       Options.withDescription("Which cycles to show."),
       Options.optional,
     ),
   },
-  ({ json, teamId, type }) =>
+  ({ json, team, type }) =>
     Effect.gen(function* () {
       const linear = yield* Linear;
-      const data = yield* linear.listCycles(teamId, orUndef(type));
+      const data = yield* linear.listCycles(team, orUndef(type));
       yield* render(json, data, () => fmt.formatCycles(data));
     }),
 ).pipe(Command.withDescription("List cycles for a team."));

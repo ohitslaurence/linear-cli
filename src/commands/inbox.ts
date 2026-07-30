@@ -1,8 +1,8 @@
-import { Args, Command, Options } from "@effect/cli";
+import { Command, Options } from "@effect/cli";
 import { Effect } from "effect";
 import { Linear } from "../client";
 import * as fmt from "../formatters";
-import { jsonOption, limitOpt, render } from "./common";
+import { jsonOption, limitOpt, render, textArg } from "./common";
 
 const inbox = Command.make(
   "inbox",
@@ -29,9 +29,7 @@ const markRead = Command.make(
   "mark-read",
   {
     json: jsonOption,
-    id: Args.text({ name: "notification-id" }).pipe(
-      Args.withDescription("Notification id."),
-    ),
+    id: textArg("notification-id", "Notification id."),
   },
   ({ json, id }) =>
     Effect.gen(function* () {
@@ -55,9 +53,7 @@ const archive = Command.make(
   "archive",
   {
     json: jsonOption,
-    id: Args.text({ name: "notification-id" }).pipe(
-      Args.withDescription("Notification id."),
-    ),
+    id: textArg("notification-id", "Notification id."),
   },
   ({ json, id }) =>
     Effect.gen(function* () {

@@ -9,6 +9,8 @@ import {
   orUndef,
   render,
   reqText,
+  requireBody,
+  textArg,
   textOpt,
 } from "./common";
 
@@ -16,7 +18,7 @@ const projects = Command.make(
   "projects",
   {
     json: jsonOption,
-    team: textOpt("team", "Filter by team key (e.g. SPR)."),
+    team: textOpt("team", "Filter by team key (SPR), name, or id."),
     limit: limitOpt(50),
   },
   ({ json, team, limit }) =>
@@ -31,9 +33,7 @@ const project = Command.make(
   "project",
   {
     json: jsonOption,
-    projectId: Args.text({ name: "project-id" }).pipe(
-      Args.withDescription("Project id."),
-    ),
+    projectId: textArg("project-id", "Project id."),
   },
   ({ json, projectId }) =>
     Effect.gen(function* () {
@@ -51,8 +51,8 @@ const projectCreate = Command.make(
   {
     json: jsonOption,
     name: reqText("name", "Project name."),
-    team: reqText("team", "Team id."),
-    lead: textOpt("lead", "Lead user id."),
+    team: reqText("team", "Team key (SPR), name, or id."),
+    lead: textOpt("lead", "Lead: 'me', an email, a display name, or a user id."),
     description: textOpt("description", "Project description."),
     targetDate: textOpt("target-date", "Target date (YYYY-MM-DD)."),
     initiative: textOpt("initiative", "Initiative id to link the project to."),
@@ -61,10 +61,11 @@ const projectCreate = Command.make(
   ({ json, name, team, lead, description, targetDate, initiative, status }) =>
     Effect.gen(function* () {
       const linear = yield* Linear;
+      const leadValue = orUndef(lead);
       const data = yield* linear.createProject({
         name,
-        teamId: team,
-        leadId: orUndef(lead),
+        teamId: (yield* linear.resolveTeam(team)).id,
+        leadId: leadValue ? yield* linear.resolveUserId(leadValue) : undefined,
         description: orUndef(description),
         targetDate: orUndef(targetDate),
         statusId: orUndef(status),
@@ -80,21 +81,20 @@ const projectEdit = Command.make(
   "project-edit",
   {
     json: jsonOption,
-    projectId: Args.text({ name: "project-id" }).pipe(
-      Args.withDescription("Project id."),
-    ),
+    projectId: textArg("project-id", "Project id."),
     name: textOpt("name", "New name."),
     status: textOpt("status", "New status id."),
-    lead: textOpt("lead", "New lead user id."),
+    lead: textOpt("lead", "New lead: 'me', an email, a display name, or a user id."),
     description: textOpt("description", "New description."),
     targetDate: textOpt("target-date", "New target date (YYYY-MM-DD)."),
   },
   ({ json, projectId, name, status, lead, description, targetDate }) =>
     Effect.gen(function* () {
+      const leadValue = orUndef(lead);
       const fields = {
         name: orUndef(name),
         statusId: orUndef(status),
-        leadId: orUndef(lead),
+        leadId: leadValue,
         description: orUndef(description),
         targetDate: orUndef(targetDate),
       };
@@ -108,7 +108,10 @@ const projectEdit = Command.make(
         );
       }
       const linear = yield* Linear;
-      const data = yield* linear.updateProject(projectId, fields);
+      const data = yield* linear.updateProject(projectId, {
+        ...fields,
+        leadId: leadValue ? yield* linear.resolveUserId(leadValue) : undefined,
+      });
       yield* render(json, data, () => fmt.formatUpdatedProject(data));
     }),
 ).pipe(Command.withDescription("Edit fields on an existing project."));
@@ -128,9 +131,7 @@ const projectUpdate = Command.make(
   "project-update",
   {
     json: jsonOption,
-    projectId: Args.text({ name: "project-id" }).pipe(
-      Args.withDescription("Project id."),
-    ),
+    projectId: textArg("project-id", "Project id."),
     body: Args.text({ name: "body" }).pipe(
       Args.withDescription("Update body."),
       Args.repeated,
@@ -142,12 +143,9 @@ const projectUpdate = Command.make(
   },
   ({ json, projectId, body, health }) =>
     Effect.gen(function* () {
+      const text = yield* requireBody("project-update", body);
       const linear = yield* Linear;
-      const id = yield* linear.postProjectUpdate(
-        projectId,
-        body.join(" "),
-        orUndef(health),
-      );
+      const id = yield* linear.postProjectUpdate(projectId, text, orUndef(health));
       yield* render(json, { id }, () => fmt.formatProjectUpdatePosted(id));
     }),
 ).pipe(Command.withDescription("Post a project update (status report)."));
