@@ -15,6 +15,7 @@
         "@effect/language-service": "^0.86.2",
         "@types/bun": "latest",
         "oxlint": "^1.66.0",
+        "typescript": "^5.7.2",
       },
       "peerDependencies": {
         "typescript": "^5",
