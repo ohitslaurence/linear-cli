@@ -12,6 +12,7 @@ import {
   ISSUE_DETAIL_QUERY,
   ISSUE_LIST_QUERY,
   ISSUE_SEARCH_QUERY,
+  PROJECT_DETAIL_QUERY,
   TEAMS_QUERY,
   VIEW_ISSUES_QUERY,
   WORKFLOW_STATES_QUERY,
@@ -25,6 +26,8 @@ import {
   type IssueDetailResponse,
   type IssueListResponse,
   type IssueSearchResponse,
+  type GqlProjectDetailNode,
+  type ProjectDetailResponse,
   type TeamsResponse,
   type ViewIssuesResponse,
   type WorkflowStatesResponse,
@@ -52,6 +55,8 @@ import {
   type InboxFilter,
   type PageInfo,
   type Paged,
+  type ProjectDetail,
+  type ProjectLink,
   type ProjectMilestone,
   type ProjectStatus,
   type ProjectSummary,
@@ -74,6 +79,8 @@ type UpdateIssueArg = Parameters<LinearClient["updateIssue"]>[1];
 type CreateProjectArg = Parameters<LinearClient["createProject"]>[0];
 type UpdateProjectArg = Parameters<LinearClient["updateProject"]>[1];
 type CreateMilestoneArg = Parameters<LinearClient["createProjectMilestone"]>[0];
+type UpdateMilestoneArg = Parameters<LinearClient["updateProjectMilestone"]>[1];
+type CreateExternalLinkArg = Parameters<LinearClient["createEntityExternalLink"]>[0];
 type CreateDocumentArg = Parameters<LinearClient["createDocument"]>[0];
 type CreateProjectUpdateArg = Parameters<LinearClient["createProjectUpdate"]>[0];
 type CreateCustomViewArg = Parameters<LinearClient["createCustomView"]>[0];
@@ -289,6 +296,50 @@ const teamOf = (node: GqlTeamNode): TeamSummary => ({
   key: node.key,
   name: node.name,
 });
+
+/** Map the one-query project read to the `project` --json contract. */
+export const projectDetailOf = (
+  node: GqlProjectDetailNode,
+): { project: ProjectDetail; milestones: ProjectMilestone[] } => {
+  const team = node.teams.nodes[0];
+  const project: ProjectDetail = {
+    id: node.id,
+    name: node.name,
+    teamKey: team?.key ?? "-",
+    teamId: team?.id ?? "-",
+    state: node.state,
+    updatedAt: new Date(node.updatedAt).toISOString(),
+    url: node.url,
+    description: node.description || undefined,
+    content: node.content || undefined,
+    status: node.status?.name,
+    lead: node.lead ? (node.lead.displayName ?? node.lead.name) : undefined,
+    startDate: node.startDate ?? undefined,
+    targetDate: node.targetDate ?? undefined,
+    links: node.externalLinks.nodes.map((l) => ({
+      id: l.id,
+      label: l.label,
+      url: l.url,
+    })),
+    documents: node.documents.nodes.map((d) => ({
+      id: d.id,
+      title: d.title,
+      url: d.url,
+    })),
+  };
+  const milestones = [...node.projectMilestones.nodes]
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map(
+      (m): ProjectMilestone => ({
+        id: m.id,
+        name: m.name,
+        description: m.description ?? undefined,
+        targetDate: m.targetDate ?? undefined,
+        progress: m.progress,
+      }),
+    );
+  return { project, milestones };
+};
 
 /**
  * `--since`, accepted as either a date or a full instant.
@@ -1216,34 +1267,47 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
       });
 
     const getProject = (projectId: string) =>
-      call("getProject", async (client) => {
-        const project = await client.project(projectId);
-        const teams = await project.teams();
-        const team = teams.nodes[0];
-        const summary: ProjectSummary = {
-          id: project.id,
-          name: project.name,
-          teamKey: team?.key ?? "-",
-          teamId: team?.id ?? "-",
-          state: project.state,
-          updatedAt: project.updatedAt.toISOString(),
+      raw<ProjectDetailResponse>("getProject", PROJECT_DETAIL_QUERY, {
+        id: projectId,
+      }).pipe(Effect.map((r) => projectDetailOf(r.project)));
+
+    const updateProjectMilestone = (
+      id: string,
+      input: { name?: string; description?: string; targetDate?: string },
+    ) =>
+      call("updateProjectMilestone", async (client) => {
+        const arg: UpdateMilestoneArg = {
+          name: input.name,
+          description: input.description,
+          targetDate: input.targetDate,
         };
-        return summary;
+        const result = await client.updateProjectMilestone(id, arg);
+        const milestone = await result.projectMilestone;
+        if (!milestone) throw new Error("Milestone not returned after update");
+        return {
+          id: milestone.id,
+          name: milestone.name,
+          description: milestone.description ?? undefined,
+          targetDate: milestone.targetDate ?? undefined,
+          progress: milestone.progress,
+        } satisfies ProjectMilestone;
       });
 
-    const getProjectMilestones = (projectId: string) =>
-      call("getProjectMilestones", async (client) => {
-        const project = await client.project(projectId);
-        const milestones = await project.projectMilestones();
-        return milestones.nodes.map(
-          (m): ProjectMilestone => ({
-            id: m.id,
-            name: m.name,
-            description: m.description ?? undefined,
-            targetDate: m.targetDate ?? undefined,
-            progress: m.progress,
-          }),
-        );
+    const createProjectLink = (input: {
+      projectId: string;
+      url: string;
+      label: string;
+    }) =>
+      call("createProjectLink", async (client) => {
+        const arg: CreateExternalLinkArg = {
+          projectId: input.projectId,
+          url: input.url,
+          label: input.label,
+        };
+        const result = await client.createEntityExternalLink(arg);
+        const link = await result.entityExternalLink;
+        if (!link) throw new Error("Link not returned after creation");
+        return { id: link.id, label: link.label, url: link.url } satisfies ProjectLink;
       });
 
     const createProjectMilestone = (input: {
@@ -1276,6 +1340,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
       teamId: string;
       leadId?: string;
       description?: string;
+      content?: string;
       targetDate?: string;
       statusId?: string;
       initiativeId?: string;
@@ -1286,6 +1351,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
           teamIds: [input.teamId],
           leadId: input.leadId,
           description: input.description,
+          content: input.content,
           targetDate: input.targetDate,
           statusId: input.statusId,
         };
@@ -1331,6 +1397,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
         statusId?: string;
         leadId?: string;
         description?: string;
+        content?: string;
         targetDate?: string;
       },
     ) =>
@@ -1340,6 +1407,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
           statusId: input.statusId,
           leadId: input.leadId,
           description: input.description,
+          content: input.content,
           targetDate: input.targetDate,
         };
         const result = await client.updateProject(id, arg);
@@ -1460,8 +1528,9 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
       getIssueHistory,
       listProjects,
       getProject,
-      getProjectMilestones,
       createProjectMilestone,
+      updateProjectMilestone,
+      createProjectLink,
       createProject,
       listProjectStatuses,
       updateProject,

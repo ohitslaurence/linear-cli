@@ -16,6 +16,8 @@ import type {
   LinearUser,
   PageInfo,
   Paged,
+  ProjectDetail,
+  ProjectLink,
   ProjectMilestone,
   ProjectStatus,
   ProjectSummary,
@@ -423,19 +425,24 @@ export const formatProjectsCSV = (paged: Paged<ProjectSummary>): string => {
 };
 
 export const formatProjectDetail = (
-  project: ProjectSummary,
+  project: ProjectDetail,
   milestones: readonly ProjectMilestone[],
 ): string => {
   const lines = [
-    `Project: ${project.name} (${project.teamKey}, ${project.state})`,
+    `Project: ${project.name} (${project.teamKey}, ${project.status ?? project.state})`,
     `ID: ${project.id}`,
-    "",
+    `URL: ${project.url}`,
   ];
+  if (project.lead) lines.push(`Lead: ${project.lead}`);
+  if (project.startDate) lines.push(`Start: ${project.startDate}`);
+  if (project.targetDate) lines.push(`Target: ${project.targetDate}`);
+  lines.push("", `Summary: ${project.description ?? "(none)"}`);
+  lines.push("", "--- Description ---", project.content ?? "(none)", "");
   if (milestones.length === 0) {
     lines.push("Milestones: none");
   } else {
     lines.push("Milestones:");
-    lines.push("id,name,targetDate,progress");
+    lines.push("id,name,targetDate,progress,description");
     for (const m of milestones) {
       lines.push(
         [
@@ -443,9 +450,21 @@ export const formatProjectDetail = (
           escapeField(m.name),
           m.targetDate ?? "-",
           `${Math.round(m.progress)}%`,
+          escapeField(m.description ?? ""),
         ].join(","),
       );
     }
+  }
+  lines.push("");
+  if (project.links.length === 0) {
+    lines.push("Links: none");
+  } else {
+    lines.push("Links:");
+    for (const l of project.links) lines.push(`- ${l.label}: ${l.url}`);
+  }
+  if (project.documents.length > 0) {
+    lines.push("Documents:");
+    for (const d of project.documents) lines.push(`- ${d.title}: ${d.url}`);
   }
   return lines.join("\n");
 };
@@ -486,6 +505,15 @@ export const formatCreatedMilestone = (milestone: ProjectMilestone): string => {
   if (milestone.targetDate) lines.push(`Target: ${milestone.targetDate}`);
   return lines.join("\n");
 };
+
+export const formatUpdatedMilestone = (milestone: ProjectMilestone): string => {
+  const lines = [`Updated milestone: ${milestone.id}`, `Name: ${milestone.name}`];
+  if (milestone.targetDate) lines.push(`Target: ${milestone.targetDate}`);
+  return lines.join("\n");
+};
+
+export const formatCreatedProjectLink = (link: ProjectLink): string =>
+  `Added link: ${link.label}\nURL: ${link.url}`;
 
 export const formatProjectUpdatePosted = (id: string): string =>
   `Project update posted: ${id}`;
