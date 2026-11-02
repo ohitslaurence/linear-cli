@@ -253,3 +253,45 @@ describe("formatCycles", () => {
     expect(out).toContain("50%");
   });
 });
+
+describe("formatProjectDetail", () => {
+  const project = {
+    id: "p1",
+    name: "EU onboarding",
+    teamKey: "SPR",
+    teamId: "t1",
+    state: "started",
+    updatedAt: "2026-10-27T10:44:05.369Z",
+    url: "https://linear.app/spritz/project/eu",
+    description: "EU users can onboard and off-ramp EUR",
+    content: "## Process checklist\n- Spec: ✅ https://notion.so/spec",
+    status: "In Progress",
+    lead: "laurence",
+    targetDate: "2026-10-16",
+    links: [{ id: "l1", label: "Spec", url: "https://notion.so/spec" }],
+    documents: [],
+  };
+
+  test("shows both descriptions, lead, milestones with descriptions, and links", () => {
+    const out = fmt.formatProjectDetail(project, [
+      { id: "m1", name: "[M1] EU onboarding", description: "SDK, ToS", targetDate: "2026-10-06", progress: 91.67 },
+    ]);
+    expect(out).toContain("Project: EU onboarding (SPR, In Progress)");
+    expect(out).toContain("Lead: laurence");
+    expect(out).toContain("Summary: EU users can onboard and off-ramp EUR");
+    expect(out).toContain("--- Description ---\n## Process checklist");
+    expect(out).toContain("m1,[M1] EU onboarding,2026-10-06,92%,\"SDK, ToS\"");
+    expect(out).toContain("- Spec: https://notion.so/spec");
+  });
+
+  test("says (none) when descriptions and links are missing", () => {
+    const out = fmt.formatProjectDetail(
+      { ...project, description: undefined, content: undefined, links: [] },
+      [],
+    );
+    expect(out).toContain("Summary: (none)");
+    expect(out).toContain("--- Description ---\n(none)");
+    expect(out).toContain("Milestones: none");
+    expect(out).toContain("Links: none");
+  });
+});

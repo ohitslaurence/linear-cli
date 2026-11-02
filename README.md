@@ -296,16 +296,26 @@ diffing per-author streams.
 
 ```bash
 linear projects [--team SPR] [--limit 50]
-linear project <project-id>                     # detail + milestones
+linear project <project-id>                     # summary, long description, lead, dates,
+                                                # milestones, links, documents
 linear project-create --name "..." --team SPR [--lead me] [--description "..."] \
+              [--content "..." | --content-file body.md] \
               [--target-date YYYY-MM-DD] [--initiative <id>] [--status <id>]
 linear project-edit <project-id> [--name "..."] [--status <id>] [--lead me] \
-              [--description "..."] [--target-date YYYY-MM-DD]
+              [--description "..."] [--content "..." | --content-file body.md] \
+              [--target-date YYYY-MM-DD]
+linear project-link <project-id> --url https://... --label "Spec"
 linear project-statuses                          # org project statuses (id, name, type)
 linear project-update <project-id> <body...> [--health onTrack|atRisk|offTrack]
 linear milestone-create --project <id> --name "..." [--target-date YYYY-MM-DD] \
               [--description "..."]
+linear milestone-edit <milestone-id> [--name "..."] [--description "..."] \
+              [--target-date YYYY-MM-DD]
 ```
+
+Linear keeps two descriptions on a project: `--description` is the short
+summary (one line, max 255 characters) and `--content` is the long-form
+markdown body. `--content` and `--content-file` replace the whole body.
 
 ### Documents, views, cycles
 
@@ -391,7 +401,7 @@ computable. `linear comments <ID> --json` gives "blocked and silent" a data
 path — the newest `createdAt` on the issue, from any author, threading intact.
 
 4. **Safety convention.** Treat mutating commands (`create`, `update`,
-   `comment`, `project-*`, `milestone-create`, `doc`, `mark-*`, `archive*`) as
+   `comment`, `project-*`, `milestone-*`, `doc`, `mark-*`, `archive*`) as
    actions to **confirm before running**, unless the consuming repo explicitly
    opts into autonomy. Read-only commands are always safe.
 
