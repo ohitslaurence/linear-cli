@@ -396,6 +396,33 @@ export interface ProjectMilestone {
   progress: number;
 }
 
+export interface ProjectLink {
+  id: string;
+  label: string;
+  url: string;
+}
+
+export interface ProjectDocument {
+  id: string;
+  title: string;
+  url: string;
+}
+
+/** `project` output: the summary plus what a reviewer reads. */
+export interface ProjectDetail extends ProjectSummary {
+  url: string;
+  /** Linear's short summary (one line, max 255 chars). */
+  description?: string;
+  /** Linear's long-form project description (markdown). */
+  content?: string;
+  status?: string;
+  lead?: string;
+  startDate?: string;
+  targetDate?: string;
+  links: ProjectLink[];
+  documents: ProjectDocument[];
+}
+
 export interface ProjectStatus {
   id: string;
   name: string;

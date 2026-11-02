@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import { isUuid, parseSince, stateFilter } from "../src/client";
+import { isUuid, parseSince, projectDetailOf, stateFilter } from "../src/client";
 
 describe("stateFilter", () => {
   // The day view is built on `open`, and the distinction from `active` is the
@@ -59,5 +59,41 @@ describe("parseSince", () => {
   // An unset shell variable used to widen the window to all time, silently.
   test("rejects an unparseable value instead of dropping the filter", () => {
     expect(failure("yesterday").field).toBe("since");
+  });
+});
+
+describe("projectDetailOf", () => {
+  const node = {
+    id: "p1",
+    name: "EU onboarding",
+    url: "https://linear.app/x",
+    description: "",
+    content: "body",
+    state: "started",
+    startDate: null,
+    targetDate: "2026-10-16",
+    updatedAt: "2026-10-27T10:44:05.369Z",
+    status: { name: "In Progress" },
+    lead: { name: "Laurence Davies", displayName: "laurence" },
+    teams: { nodes: [{ id: "t1", key: "SPR" }] },
+    projectMilestones: {
+      nodes: [
+        { id: "m2", name: "[M2]", description: null, targetDate: null, progress: 0, sortOrder: 2 },
+        { id: "m1", name: "[M1]", description: "d", targetDate: "2026-10-06", progress: 50, sortOrder: 1 },
+      ],
+    },
+    externalLinks: { nodes: [{ id: "l1", label: "Spec", url: "https://notion.so/s" }] },
+    documents: { nodes: [] },
+  };
+
+  test("orders milestones by sortOrder and maps empty strings to undefined", () => {
+    const { project, milestones } = projectDetailOf(node);
+    expect(milestones.map((m) => m.id)).toEqual(["m1", "m2"]);
+    expect(project.description).toBeUndefined();
+    expect(project.content).toBe("body");
+    expect(project.lead).toBe("laurence");
+    expect(project.status).toBe("In Progress");
+    expect(project.teamKey).toBe("SPR");
+    expect(project.links).toEqual([{ id: "l1", label: "Spec", url: "https://notion.so/s" }]);
   });
 });

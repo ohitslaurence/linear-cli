@@ -244,3 +244,63 @@ export interface WorkflowStatesResponse {
 export interface TeamsResponse {
   teams: GqlConnection<GqlTeamNode>;
 }
+
+/**
+ * A project with everything a reviewer reads: both descriptions, lead,
+ * status, dates, milestones, links and documents — one request instead of a
+ * lazy fetch per relation.
+ */
+export const PROJECT_DETAIL_QUERY = `
+  query CliProject($id: String!) {
+    project(id: $id) {
+      id
+      name
+      url
+      description
+      content
+      state
+      startDate
+      targetDate
+      updatedAt
+      status { name }
+      lead { name displayName }
+      teams(first: 1) { nodes { id key } }
+      projectMilestones(first: 100) {
+        nodes { id name description targetDate progress sortOrder }
+      }
+      externalLinks(first: 100) { nodes { id label url } }
+      documents(first: 100) { nodes { id title url } }
+    }
+  }
+`;
+
+export interface GqlProjectDetailNode {
+  id: string;
+  name: string;
+  url: string;
+  description?: string | null;
+  content?: string | null;
+  state: string;
+  startDate?: string | null;
+  targetDate?: string | null;
+  updatedAt: string;
+  status?: { name: string } | null;
+  lead?: { name: string; displayName?: string | null } | null;
+  teams: { nodes: { id: string; key: string }[] };
+  projectMilestones: {
+    nodes: {
+      id: string;
+      name: string;
+      description?: string | null;
+      targetDate?: string | null;
+      progress: number;
+      sortOrder: number;
+    }[];
+  };
+  externalLinks: { nodes: { id: string; label: string; url: string }[] };
+  documents: { nodes: { id: string; title: string; url: string }[] };
+}
+
+export interface ProjectDetailResponse {
+  project: GqlProjectDetailNode;
+}
