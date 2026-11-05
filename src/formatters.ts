@@ -403,6 +403,13 @@ export const formatHistoryEntries = (paged: Paged<HistoryEntry>): string => {
       changes.push(
         `Priority: ${formatPriority(entry.fromPriority)} → ${formatPriority(entry.toPriority)}`,
       );
+    if (entry.fromDueDate || entry.toDueDate) {
+      if (entry.toDueDate && !entry.fromDueDate)
+        changes.push(`Due date set: ${entry.toDueDate}`);
+      else if (!entry.toDueDate && entry.fromDueDate)
+        changes.push(`Due date cleared (was ${entry.fromDueDate})`);
+      else changes.push(`Due date: ${entry.fromDueDate} → ${entry.toDueDate}`);
+    }
     if (entry.addedLabels?.length)
       changes.push(`Added labels: ${entry.addedLabels.join(", ")}`);
     if (entry.removedLabels?.length)

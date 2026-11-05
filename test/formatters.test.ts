@@ -295,3 +295,25 @@ describe("formatProjectDetail", () => {
     expect(out).toContain("Links: none");
   });
 });
+
+describe("formatHistoryEntries", () => {
+  const at = new Date("2026-11-03T22:18:54.000Z");
+  test("shows due dates set, moved and cleared", () => {
+    const out = fmt.formatHistoryEntries(
+      paged([
+        { id: "h1", createdAt: at, actorName: "Lucas", toDueDate: "2026-11-03" },
+        {
+          id: "h2",
+          createdAt: at,
+          actorName: "Lucas",
+          fromDueDate: "2026-11-03",
+          toDueDate: "2026-11-05",
+        },
+        { id: "h3", createdAt: at, fromDueDate: "2026-11-05" },
+      ]),
+    );
+    expect(out).toContain("Lucas: Due date set: 2026-11-03");
+    expect(out).toContain("Lucas: Due date: 2026-11-03 → 2026-11-05");
+    expect(out).toContain("- Due date cleared (was 2026-11-05)");
+  });
+});

@@ -1704,6 +1704,9 @@ const collectUserActivity = async (
   };
 };
 
+// History due dates arrive as midnight-UTC timestamps; the day is the value.
+const dueDay = (value: unknown): string => String(value).slice(0, 10);
+
 const collectIssueHistory = async (
   client: LinearClient,
   issueId: string,
@@ -1739,6 +1742,8 @@ const collectIssueHistory = async (
       out.toAssignee = userMap.get(entry.toAssigneeId) ?? entry.toAssigneeId;
     if (entry.fromPriority != null) out.fromPriority = entry.fromPriority;
     if (entry.toPriority != null) out.toPriority = entry.toPriority;
+    if (entry.fromDueDate != null) out.fromDueDate = dueDay(entry.fromDueDate);
+    if (entry.toDueDate != null) out.toDueDate = dueDay(entry.toDueDate);
     if (entry.addedLabelIds?.length) out.addedLabels = entry.addedLabelIds;
     if (entry.removedLabelIds?.length) out.removedLabels = entry.removedLabelIds;
     entries.push(out);
