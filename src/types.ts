@@ -371,6 +371,9 @@ export interface HistoryEntry {
   toAssignee?: string;
   fromPriority?: number;
   toPriority?: number;
+  /** Linear TimelessDate (YYYY-MM-DD). */
+  fromDueDate?: string;
+  toDueDate?: string;
   addedLabels?: string[];
   removedLabels?: string[];
 }

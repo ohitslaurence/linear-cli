@@ -1739,6 +1739,8 @@ const collectIssueHistory = async (
       out.toAssignee = userMap.get(entry.toAssigneeId) ?? entry.toAssigneeId;
     if (entry.fromPriority != null) out.fromPriority = entry.fromPriority;
     if (entry.toPriority != null) out.toPriority = entry.toPriority;
+    if (entry.fromDueDate != null) out.fromDueDate = entry.fromDueDate;
+    if (entry.toDueDate != null) out.toDueDate = entry.toDueDate;
     if (entry.addedLabelIds?.length) out.addedLabels = entry.addedLabelIds;
     if (entry.removedLabelIds?.length) out.removedLabels = entry.removedLabelIds;
     entries.push(out);
