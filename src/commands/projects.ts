@@ -1,6 +1,6 @@
 import { Args, Command, Options } from "@effect/cli";
 import { Effect } from "effect";
-import { Linear } from "../client";
+import { Linear, PROJECT_STATES } from "../client";
 import { ValidationError } from "../errors";
 import * as fmt from "../formatters";
 import {
@@ -198,6 +198,37 @@ const projectUpdate = Command.make(
     }),
 ).pipe(Command.withDescription("Post a project update (status report)."));
 
+const projectUpdates = Command.make(
+  "project-updates",
+  {
+    json: jsonOption,
+    state: Options.choice("state", PROJECT_STATES).pipe(
+      Options.withDescription(
+        "Project state to include (default started, Linear's 'In progress').",
+      ),
+      Options.withDefault("started" as const),
+    ),
+    lead: textOpt("lead", "Filter by lead: 'me', an email, a display name, or a user id."),
+    team: textOpt("team", "Filter by team key (SPR), name, or id."),
+    limit: limitOpt(100),
+  },
+  ({ json, state, lead, team, limit }) =>
+    Effect.gen(function* () {
+      const linear = yield* Linear;
+      const data = yield* linear.listProjectUpdates({
+        state,
+        lead: orUndef(lead),
+        team: orUndef(team),
+        limit,
+      });
+      yield* render(json, data, () => fmt.formatProjectUpdatesCSV(data));
+    }),
+).pipe(
+  Command.withDescription(
+    "Read each project's latest update (status report) with its lead, target date and health. Read-only.",
+  ),
+);
+
 const milestoneCreate = Command.make(
   "milestone-create",
   {
@@ -274,6 +305,7 @@ export const projectCommands = [
   projectEdit,
   projectStatuses,
   projectUpdate,
+  projectUpdates,
   milestoneCreate,
   milestoneEdit,
   projectLink,

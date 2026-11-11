@@ -21,6 +21,7 @@ import type {
   ProjectMilestone,
   ProjectStatus,
   ProjectSummary,
+  ProjectUpdateStatus,
   TeamSummary,
   UpdatedProject,
   UserActivity,
@@ -427,6 +428,29 @@ export const formatProjectsCSV = (paged: Paged<ProjectSummary>): string => {
     [p.id, escapeField(p.name), p.teamKey, p.state, formatDate(p.updatedAt)].join(
       ",",
     ),
+  );
+  return withPageNote(paged, [header, ...rows].join("\n"));
+};
+
+/**
+ * One row per project. `last_update` is a UTC timestamp, not a day, because
+ * "posted since Monday 15:00" is the question this answers.
+ */
+export const formatProjectUpdatesCSV = (
+  paged: Paged<ProjectUpdateStatus>,
+): string => {
+  if (paged.items.length === 0) return "No projects found.";
+  const header = "project,lead,target,health,last_update,update_health,author";
+  const rows = paged.items.map((p) =>
+    [
+      escapeField(p.project),
+      escapeField(p.lead?.name),
+      p.targetDate ?? "-",
+      p.health ?? "-",
+      p.latestUpdate ? formatDateTime(p.latestUpdate.createdAt) : "never",
+      p.latestUpdate?.health ?? "-",
+      escapeField(p.latestUpdate?.author),
+    ].join(","),
   );
   return withPageNote(paged, [header, ...rows].join("\n"));
 };
