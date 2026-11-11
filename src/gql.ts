@@ -304,3 +304,64 @@ export interface GqlProjectDetailNode {
 export interface ProjectDetailResponse {
   project: GqlProjectDetailNode;
 }
+
+/**
+ * Every project in a lifecycle state with its lead, dates, current health and
+ * most recent update — one request per page instead of a lazy fetch for the
+ * lead, the teams and the update on every project.
+ */
+export const PROJECT_UPDATES_QUERY = `
+  query CliProjectUpdates($filter: ProjectFilter, $first: Int!, $after: String) {
+    projects(filter: $filter, first: $first, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id
+        name
+        url
+        targetDate
+        health
+        status { type }
+        lead { id name displayName email }
+        teams(first: 1) { nodes { key } }
+        lastUpdate {
+          id
+          createdAt
+          health
+          body
+          url
+          user { name displayName }
+        }
+      }
+    }
+  }
+`;
+
+export interface GqlProjectUpdateNode {
+  id: string;
+  createdAt: string;
+  health?: string | null;
+  body: string;
+  url: string;
+  user?: { name: string; displayName?: string | null } | null;
+}
+
+export interface GqlProjectUpdateStatusNode {
+  id: string;
+  name: string;
+  url: string;
+  targetDate?: string | null;
+  health?: string | null;
+  status: { type: string };
+  lead?: {
+    id: string;
+    name: string;
+    displayName?: string | null;
+    email?: string | null;
+  } | null;
+  teams: { nodes: { key: string }[] };
+  lastUpdate?: GqlProjectUpdateNode | null;
+}
+
+export interface ProjectUpdatesResponse {
+  projects: GqlConnection<GqlProjectUpdateStatusNode>;
+}

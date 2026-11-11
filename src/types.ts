@@ -426,6 +426,41 @@ export interface ProjectDetail extends ProjectSummary {
   documents: ProjectDocument[];
 }
 
+/** The most recent project update (status report) on a project. */
+export interface LatestProjectUpdate {
+  id: string;
+  createdAt: string;
+  author: string | null;
+  /** Health recorded on the update itself: onTrack | atRisk | offTrack. */
+  health: string | null;
+  body: string;
+  url: string;
+}
+
+/**
+ * `project-updates` output: one row per project, enough to judge whether its
+ * status report is fresh and agrees with the project.
+ *
+ * Absent values are explicit `null` rather than omitted: a bot checking
+ * "has this project ever had an update" reads `latestUpdate === null`, and a
+ * missing key would be indistinguishable from a schema change.
+ */
+export interface ProjectUpdateStatus {
+  projectId: string;
+  project: string;
+  url: string;
+  /** Lifecycle state: backlog | planned | started | paused | completed | canceled. */
+  state: string;
+  teamKey: string | null;
+  lead: { id: string; name: string; email: string | null } | null;
+  /** YYYY-MM-DD, as Linear stores it. */
+  targetDate: string | null;
+  /** The project's current health: onTrack | atRisk | offTrack. */
+  health: string | null;
+  /** Null when the project has never had an update. */
+  latestUpdate: LatestProjectUpdate | null;
+}
+
 export interface ProjectStatus {
   id: string;
   name: string;

@@ -13,6 +13,7 @@ import {
   ISSUE_LIST_QUERY,
   ISSUE_SEARCH_QUERY,
   PROJECT_DETAIL_QUERY,
+  PROJECT_UPDATES_QUERY,
   TEAMS_QUERY,
   VIEW_ISSUES_QUERY,
   WORKFLOW_STATES_QUERY,
@@ -28,6 +29,8 @@ import {
   type IssueSearchResponse,
   type GqlProjectDetailNode,
   type ProjectDetailResponse,
+  type GqlProjectUpdateStatusNode,
+  type ProjectUpdatesResponse,
   type TeamsResponse,
   type ViewIssuesResponse,
   type WorkflowStatesResponse,
@@ -60,6 +63,7 @@ import {
   type ProjectMilestone,
   type ProjectStatus,
   type ProjectSummary,
+  type ProjectUpdateStatus,
   type TeamSummary,
   type UpdateIssueInput,
   type UpdateIssueRequest,
@@ -74,6 +78,8 @@ import {
 // we build stay fully typed without `as any` / `as unknown`.
 type IssuesArgs = NonNullable<Parameters<LinearClient["issues"]>[0]>;
 type IssueQueryFilter = NonNullable<IssuesArgs["filter"]>;
+type ProjectsArgs = NonNullable<Parameters<LinearClient["projects"]>[0]>;
+type ProjectQueryFilter = NonNullable<ProjectsArgs["filter"]>;
 type CreateIssueArg = Parameters<LinearClient["createIssue"]>[0];
 type UpdateIssueArg = Parameters<LinearClient["updateIssue"]>[1];
 type CreateProjectArg = Parameters<LinearClient["createProject"]>[0];
@@ -339,6 +345,72 @@ export const projectDetailOf = (
       }),
     );
   return { project, milestones };
+};
+
+/** Project lifecycle states, as Linear's `ProjectStatus.type` spells them. */
+export const PROJECT_STATES = [
+  "backlog",
+  "planned",
+  "started",
+  "paused",
+  "completed",
+  "canceled",
+] as const;
+
+export type ProjectState = (typeof PROJECT_STATES)[number];
+
+/**
+ * The server-side filter for `project-updates`.
+ *
+ * Filters on `status.type` rather than the deprecated `state` comparator; the
+ * values are the same. Team matches any of a project's teams, not only the
+ * first, so a shared project shows up under each team that owns it.
+ */
+export const projectUpdatesFilter = (input: {
+  state: ProjectState;
+  leadId?: string;
+  teamId?: string;
+}): ProjectQueryFilter => ({
+  status: { type: { eq: input.state } },
+  ...(input.leadId ? { lead: { id: { eq: input.leadId } } } : {}),
+  ...(input.teamId
+    ? { accessibleTeams: { some: { id: { eq: input.teamId } } } }
+    : {}),
+});
+
+/** Map one project row to the `project-updates` --json contract. */
+export const projectUpdateStatusOf = (
+  node: GqlProjectUpdateStatusNode,
+): ProjectUpdateStatus => {
+  const update = node.lastUpdate;
+  return {
+    projectId: node.id,
+    project: node.name,
+    url: node.url,
+    state: node.status.type,
+    teamKey: node.teams.nodes[0]?.key ?? null,
+    lead: node.lead
+      ? {
+          id: node.lead.id,
+          name: node.lead.displayName ?? node.lead.name,
+          email: node.lead.email ?? null,
+        }
+      : null,
+    targetDate: node.targetDate ?? null,
+    health: node.health ?? null,
+    latestUpdate: update
+      ? {
+          id: update.id,
+          createdAt: new Date(update.createdAt).toISOString(),
+          author: update.user
+            ? (update.user.displayName ?? update.user.name)
+            : null,
+          health: update.health ?? null,
+          body: update.body,
+          url: update.url,
+        }
+      : null,
+  };
 };
 
 /**
@@ -1271,6 +1343,34 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
         id: projectId,
       }).pipe(Effect.map((r) => projectDetailOf(r.project)));
 
+    /**
+     * Each project in `state` with its lead, target date, health and latest
+     * update, in one query per page of 50. Read-only.
+     */
+    const listProjectUpdates = (input: {
+      state: ProjectState;
+      lead?: string;
+      team?: string;
+      limit?: number;
+    }) =>
+      Effect.gen(function* () {
+        const filter = projectUpdatesFilter({
+          state: input.state,
+          leadId: input.lead ? yield* resolveUserId(input.lead) : undefined,
+          teamId: input.team ? (yield* resolveTeam(input.team)).id : undefined,
+        });
+        return yield* collectPaged(
+          input.limit ?? 100,
+          (first, after) =>
+            raw<ProjectUpdatesResponse>(
+              "listProjectUpdates",
+              PROJECT_UPDATES_QUERY,
+              { filter, first, after },
+            ).pipe(Effect.map((r) => ({ connection: r.projects }))),
+          projectUpdateStatusOf,
+        );
+      });
+
     const updateProjectMilestone = (
       id: string,
       input: { name?: string; description?: string; targetDate?: string },
@@ -1528,6 +1628,7 @@ export class Linear extends Effect.Service<Linear>()("Linear", {
       getIssueHistory,
       listProjects,
       getProject,
+      listProjectUpdates,
       createProjectMilestone,
       updateProjectMilestone,
       createProjectLink,

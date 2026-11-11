@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import { isUuid, parseSince, projectDetailOf, stateFilter } from "../src/client";
+import {
+  isUuid,
+  parseSince,
+  projectDetailOf,
+  projectUpdateStatusOf,
+  projectUpdatesFilter,
+  stateFilter,
+} from "../src/client";
 
 describe("stateFilter", () => {
   // The day view is built on `open`, and the distinction from `active` is the
@@ -95,5 +102,83 @@ describe("projectDetailOf", () => {
     expect(project.status).toBe("In Progress");
     expect(project.teamKey).toBe("SPR");
     expect(project.links).toEqual([{ id: "l1", label: "Spec", url: "https://notion.so/s" }]);
+  });
+});
+
+describe("projectUpdatesFilter", () => {
+  test("filters on status type, not the deprecated state comparator", () => {
+    expect(projectUpdatesFilter({ state: "started" })).toEqual({
+      status: { type: { eq: "started" } },
+    });
+  });
+
+  test("adds lead and any-team filters only when given", () => {
+    expect(
+      projectUpdatesFilter({ state: "paused", leadId: "u1", teamId: "t1" }),
+    ).toEqual({
+      status: { type: { eq: "paused" } },
+      lead: { id: { eq: "u1" } },
+      accessibleTeams: { some: { id: { eq: "t1" } } },
+    });
+  });
+});
+
+describe("projectUpdateStatusOf", () => {
+  const node = {
+    id: "p1",
+    name: "KYC Pass-Through",
+    url: "https://linear.app/x/project/kyc",
+    targetDate: "2026-11-23",
+    health: "atRisk",
+    status: { type: "started" },
+    lead: { id: "u1", name: "Alex A", displayName: "alex", email: "alex@x.com" },
+    teams: { nodes: [{ key: "GROW" }] },
+    lastUpdate: {
+      id: "pu1",
+      createdAt: "2026-11-09T14:23:49.293Z",
+      health: "onTrack",
+      body: "In grooming.",
+      url: "https://linear.app/x/project/kyc#pu1",
+      user: { name: "Alex A", displayName: "alex" },
+    },
+  };
+
+  test("maps a project with an update to the --json contract", () => {
+    expect(projectUpdateStatusOf(node)).toEqual({
+      projectId: "p1",
+      project: "KYC Pass-Through",
+      url: "https://linear.app/x/project/kyc",
+      state: "started",
+      teamKey: "GROW",
+      lead: { id: "u1", name: "alex", email: "alex@x.com" },
+      targetDate: "2026-11-23",
+      health: "atRisk",
+      latestUpdate: {
+        id: "pu1",
+        createdAt: "2026-11-09T14:23:49.293Z",
+        author: "alex",
+        health: "onTrack",
+        body: "In grooming.",
+        url: "https://linear.app/x/project/kyc#pu1",
+      },
+    });
+  });
+
+  test("uses explicit nulls for a project with no lead, team, dates or update", () => {
+    const status = projectUpdateStatusOf({
+      ...node,
+      targetDate: null,
+      health: null,
+      lead: null,
+      teams: { nodes: [] },
+      lastUpdate: null,
+    });
+    expect(status).toMatchObject({
+      teamKey: null,
+      lead: null,
+      targetDate: null,
+      health: null,
+      latestUpdate: null,
+    });
   });
 });

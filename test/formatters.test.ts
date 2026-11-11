@@ -6,6 +6,7 @@ import type {
   IssueDetail,
   IssueSummary,
   Paged,
+  ProjectUpdateStatus,
 } from "../src/types";
 
 /** The envelope every list command now emits. */
@@ -315,5 +316,68 @@ describe("formatHistoryEntries", () => {
     expect(out).toContain("Lucas: Due date set: 2026-11-03");
     expect(out).toContain("Lucas: Due date: 2026-11-03 → 2026-11-05");
     expect(out).toContain("- Due date cleared (was 2026-11-05)");
+  });
+});
+
+describe("formatProjectUpdatesCSV", () => {
+  const withUpdate: ProjectUpdateStatus = {
+    projectId: "p1",
+    project: "ACH Debit returns, alerts",
+    url: "https://linear.app/x/project/ach",
+    state: "started",
+    teamKey: "SPR",
+    lead: { id: "u1", name: "laurence", email: "l@x.com" },
+    targetDate: "2026-11-16",
+    health: "atRisk",
+    latestUpdate: {
+      id: "pu1",
+      createdAt: "2026-11-10T10:46:00.000Z",
+      author: "pedro",
+      health: "onTrack",
+      body: "Shipped returns.",
+      url: "https://linear.app/x/project/ach#pu1",
+    },
+  };
+  const never: ProjectUpdateStatus = {
+    ...withUpdate,
+    projectId: "p2",
+    project: "Treasury",
+    lead: null,
+    targetDate: null,
+    health: null,
+    latestUpdate: null,
+  };
+
+  test("renders a header and one row per project, 'never' for no update", () => {
+    const out = fmt.formatProjectUpdatesCSV(paged([withUpdate, never]));
+    expect(out.split("\n")).toEqual([
+      "project,lead,target,health,last_update,update_health,author",
+      '"ACH Debit returns, alerts",laurence,2026-11-16,atRisk,2026-11-10 10:46Z,onTrack,pedro',
+      "Treasury,-,-,-,never,-,-",
+    ]);
+  });
+
+  test("appends the page note when truncated", () => {
+    const out = fmt.formatProjectUpdatesCSV(
+      paged([withUpdate], { hasNextPage: true, truncated: true }),
+    );
+    expect(out).toContain("more remain; raise --limit");
+  });
+
+  test("says so when there are no projects", () => {
+    expect(fmt.formatProjectUpdatesCSV(paged([]))).toBe("No projects found.");
+  });
+
+  test("--json keeps explicit nulls and the full update body", () => {
+    const parsed = JSON.parse(fmt.toJson(paged([withUpdate, never]))) as {
+      items: Array<Record<string, unknown>>;
+    };
+    expect(parsed.items[0]).toEqual({ ...withUpdate });
+    expect(parsed.items[1]).toMatchObject({
+      lead: null,
+      targetDate: null,
+      health: null,
+      latestUpdate: null,
+    });
   });
 });
