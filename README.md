@@ -307,6 +307,9 @@ linear project-edit <project-id> [--name "..."] [--status <id>] [--lead me] \
 linear project-link <project-id> --url https://... --label "Spec"
 linear project-statuses                          # org project statuses (id, name, type)
 linear project-update <project-id> <body...> [--health onTrack|atRisk|offTrack]
+linear project-updates [--state started] [--lead me] [--team SPR] [--limit 100]
+                                                # read-only: each project's latest update,
+                                                # lead, target date and health
 linear milestone-create --project <id> --name "..." [--target-date YYYY-MM-DD] \
               [--description "..."]
 linear milestone-edit <milestone-id> [--name "..."] [--description "..."] \
@@ -316,6 +319,16 @@ linear milestone-edit <milestone-id> [--name "..."] [--description "..."] \
 Linear keeps two descriptions on a project: `--description` is the short
 summary (one line, max 255 characters) and `--content` is the long-form
 markdown body. `--content` and `--content-file` replace the whole body.
+
+`project-updates` answers "has every in-progress project posted a fresh status
+report, and does it agree with the project?" in one query. `--state` takes
+Linear's lifecycle values (`backlog`, `planned`, `started`, `paused`,
+`completed`, `canceled`; default `started`, shown as "In progress"). `--team`
+matches any of a project's teams. Text output is CSV
+(`project,lead,target,health,last_update,update_health,author`, with
+`last_update` in UTC and `never` when there has been none); `--json` gives each
+row with explicit nulls, and `latestUpdate: null` for a project that has never
+had an update.
 
 ### Documents, views, cycles
 
